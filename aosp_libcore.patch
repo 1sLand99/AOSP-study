@@ -1,0 +1,129 @@
+diff --git a/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java b/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java
+index 60511a9c2d..cb27669124 100644
+--- a/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java
++++ b/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java
+@@ -131,6 +131,7 @@ public class BaseDexClassLoader extends ClassLoader {
+         this.sharedLibraryLoaders = sharedLibraryLoaders == null
+                 ? null
+                 : Arrays.copyOf(sharedLibraryLoaders, sharedLibraryLoaders.length);
++                //关键 DexPathList
+         this.pathList = new DexPathList(this, dexPath, librarySearchPath, null, isTrusted);
+ 
+         // Run background verification after having set 'pathList'.
+diff --git a/dalvik/src/main/java/dalvik/system/DexPathList.java b/dalvik/src/main/java/dalvik/system/DexPathList.java
+index acf5e6635e..44cfe2f890 100644
+--- a/dalvik/src/main/java/dalvik/system/DexPathList.java
++++ b/dalvik/src/main/java/dalvik/system/DexPathList.java
+@@ -134,6 +134,13 @@ public final class DexPathList {
+         this(definingContext, dexPath, librarySearchPath, optimizedDirectory, false);
+     }
+ 
++    /**
++     * definingContext 当前应用的类加载器
++     * dexPath dex文件的路径
++     * librarySearchPath so的路径
++     * optimizedDirectory null
++     * isTrysted false 是否受信任
++     */
+     DexPathList(ClassLoader definingContext, String dexPath,
+             String librarySearchPath, File optimizedDirectory, boolean isTrusted) {
+         if (definingContext == null) {
+@@ -163,6 +170,13 @@ public final class DexPathList {
+ 
+         ArrayList<IOException> suppressedExceptions = new ArrayList<IOException>();
+         // save dexPath for BaseDexClassLoader
++        /** 获取一个包含dex文件的元素集合，保存到一个数组元素中
++         * splitDexPath(dexPath) ListArray
++         * optimizedDirectory 为null
++         * suppressdExceptions IOException Array
++         * definingContext 当前应用的类加载器
++         * isTrysted false
++         */
+         this.dexElements = makeDexElements(splitDexPath(dexPath), optimizedDirectory,
+                                            suppressedExceptions, definingContext, isTrusted);
+ 
+@@ -176,9 +190,12 @@ public final class DexPathList {
+         //      also known as java.library.path
+         //
+         // This order was reversed prior to Gingerbread; see http://b/2933456.
++        //app目录的native库
+         this.nativeLibraryDirectories = splitPaths(librarySearchPath, false);
++        //系统目录的native库
+         this.systemNativeLibraryDirectories =
+                 splitPaths(System.getProperty("java.library.path"), true);
++        //记住所有的native库
+         this.nativeLibraryPathElements = makePathElements(getAllNativeLibraryDirectories());
+ 
+         if (suppressedExceptions.size() > 0) {
+@@ -365,27 +382,41 @@ public final class DexPathList {
+     }
+ 
+ 
++    /** 为本地库搜索路径生成一个directory/zip path元素数组
++     * files ListArray
++     * optimizedDirectory null
++     * superessedExceptions IOException Array
++     * loader 当前应用的类加载器
++     * isTrusted false
++     */
+     private static Element[] makeDexElements(List<File> files, File optimizedDirectory,
+             List<IOException> suppressedExceptions, ClassLoader loader, boolean isTrusted) {
+-      Element[] elements = new Element[files.size()];
++      Element[] elements = new Element[files.size()]; //对象数组
+       int elementsPos = 0;
+       /*
+        * Open all files and load the (direct or contained) dex files up front.
+        */
+       for (File file : files) {
+-          if (file.isDirectory()) {
++        //System.logW("Jiang DexFilePath:"+file.getPath());
++          /** 这里启动了一个via浏览器
++           *  Jiang DexFilePath:/data/app/~~iATc3PGdLu4WINQtEQ2ZIg==/mark.via-kSj_VFFlfCo-atwnZ01sXw==/base.apk
++           *  Jiang DexFilePath:/product/app/webview/webview.apk
++           */
++          if (file.isDirectory()) { //如果是目录
+               // We support directories for looking up resources. Looking up resources in
+               // directories is useful for running libcore tests.
+               elements[elementsPos++] = new Element(file);
+-          } else if (file.isFile()) {
++          } else if (file.isFile()) { //如果是文件
+               String name = file.getName();
+ 
+               DexFile dex = null;
++              //判断文件是否是以.dex结尾
+               if (name.endsWith(DEX_SUFFIX)) {
+                   // Raw dex file (not inside a zip/jar).
+                   try {
++                    //尝试加载dex文件，而且会吧优化后的dex文件缓存到对应的目录中
+                       dex = loadDexFile(file, optimizedDirectory, loader, elements);
+-                      if (dex != null) {
++                      if (dex != null) { 
+                           elements[elementsPos++] = new Element(dex, null);
+                       }
+                   } catch (IOException suppressed) {
+@@ -407,13 +438,13 @@ public final class DexPathList {
+                   }
+ 
+                   if (dex == null) {
+-                      elements[elementsPos++] = new Element(file);
++                      elements[elementsPos++] = new Element(file);//生成file对应的Element对象
+                   } else {
+-                      elements[elementsPos++] = new Element(dex, file);
++                      elements[elementsPos++] = new Element(dex, file);//生成dexFile对应的Element对象
+                   }
+               }
+-              if (dex != null && isTrusted) {
+-                dex.setTrusted();
++              if (dex != null && isTrusted) {//如果dex对象不为空的且是允许信任状态
++                dex.setTrusted(); //将此dex对象设置为信任，它可以访问平台的隐藏apu
+               }
+           } else {
+               System.logW("ClassLoader referenced unknown path: " + file);
+@@ -435,6 +466,7 @@ public final class DexPathList {
+                                        Element[] elements)
+             throws IOException {
+         if (optimizedDirectory == null) {
++            //创建DexFile对象
+             return new DexFile(file, loader, elements);
+         } else {
+             String optimizedPath = optimizedPathFor(file, optimizedDirectory);

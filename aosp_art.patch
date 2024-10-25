@@ -1,0 +1,394 @@
+diff --git a/libdexfile/dex/art_dex_file_loader.cc b/libdexfile/dex/art_dex_file_loader.cc
+index 62014aa67f..a12edf57bf 100644
+--- a/libdexfile/dex/art_dex_file_loader.cc
++++ b/libdexfile/dex/art_dex_file_loader.cc
+@@ -222,6 +222,14 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::Open(const std::string& locatio
+   return dex_file;
+ }
+ 
++/**
++ * filename dex的路径
++ * location dex的位置
++ * verify 是否需要验证
++ * verify_checksum 是否需要校验
++ * error_msg 错误信息
++ * dex_files 存放dex文件的指针地址
++ */
+ bool ArtDexFileLoader::Open(const char* filename,
+                             const std::string& location,
+                             bool verify,
+@@ -229,11 +237,13 @@ bool ArtDexFileLoader::Open(const char* filename,
+                             std::string* error_msg,
+                             std::vector<std::unique_ptr<const DexFile>>* dex_files) const {
+   uint32_t magic;
++  //打开并读取magic filename:dex的路径 magic:空地址存放魔术头
+   File fd = OpenAndReadMagic(filename, &magic, error_msg);
+   if (fd.Fd() == -1) {
+     DCHECK(!error_msg->empty());
+     return false;
+   }
++  //使用magic打开
+   return OpenWithMagic(
+       magic, fd.Release(), location, verify, verify_checksum, error_msg, dex_files);
+ }
+@@ -263,7 +273,11 @@ bool ArtDexFileLoader::Open(const char* filename,
+       ? Open(filename, location, verify, verify_checksum, error_msg, dex_files)
+       : Open(fd, location, verify, verify_checksum, error_msg, dex_files);
+ }
+-
++/** 方法出现两个分支 判断zip magic，和是否是有效的magic
++ * fd : null 被释放过的
++ * location dex的路径
++ * dex_file 存放dex文件的指针地址
++ */ 
+ bool ArtDexFileLoader::OpenWithMagic(uint32_t magic,
+                                      int fd,
+                                      const std::string& location,
+@@ -274,8 +288,10 @@ bool ArtDexFileLoader::OpenWithMagic(uint32_t magic,
+   ScopedTrace trace(std::string("Open dex file ") + std::string(location));
+   DCHECK(dex_files != nullptr) << "DexFile::Open: out-param is nullptr";
+   if (IsZipMagic(magic)) {
++    //如果是zip类型就使用OpenZip方法
+     return OpenZip(fd, location, verify, verify_checksum, error_msg, dex_files);
+   }
++  //进入OpenFile函数解析dex文件
+   if (IsMagicValid(magic)) {
+     std::unique_ptr<const DexFile> dex_file(OpenFile(fd,
+                                                      location,
+@@ -391,6 +407,15 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenFile(int fd,
+   return dex_file;
+ }
+ 
++/** 在zip中打开一个dex文件
++ * zip_archive 解压后的文件内存地址
++ * name dex文件名称
++ * fake_location 生成的dex文件路径
++ * verify 是否校验
++ * verify_checksum 是否校验校验和
++ * error_msg 错误信息
++ * error_code 错误码
++ */
+ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenOneDexFileFromZip(
+     const ZipArchive& zip_archive,
+     const char* entry_name,
+@@ -450,6 +475,7 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenOneDexFileFromZip(
+   VerifyResult verify_result;
+   uint8_t* begin = map.Begin();
+   size_t size = map.Size();
++  //解析dex的文件代码 dex_file 最终脱壳点
+   std::unique_ptr<DexFile> dex_file = OpenCommon(begin,
+                                                  size,
+                                                  /*data_base=*/ nullptr,
+@@ -495,6 +521,15 @@ std::unique_ptr<const DexFile> ArtDexFileLoader::OpenOneDexFileFromZip(
+ // seems an excessive number.
+ static constexpr size_t kWarnOnManyDexFilesThreshold = 100;
+ 
++/**
++ * 从Zip中打开所有的Dex文件 zip因此被解压到内存中，加载即可
++ * zip_archive 解压后的文件内存地址
++ * location zip文件路径
++ * verify 是否校验
++ * verify_checksum 是否校验校验和
++ * error_msg 错误信息
++ * dex_files 保存加载完成后的dex数据地址
++ */
+ bool ArtDexFileLoader::OpenAllDexFilesFromZip(
+     const ZipArchive& zip_archive,
+     const std::string& location,
+@@ -524,8 +559,18 @@ bool ArtDexFileLoader::OpenAllDexFilesFromZip(
+     // do not expect a lot of iterations, this seems too involved and brittle.
+ 
+     for (size_t i = 1; ; ++i) {
++      //获取多个classes.dex的dex文件名称，classes.dex classes2.dex classes3.dex .....
+       std::string name = GetMultiDexClassesDexName(i);
+       std::string fake_location = GetMultiDexLocation(i, location.c_str());
++      /** OpenOneDexFileFromZip : 在zip中打开一个dex文件
++       * zip_archive 解压后的文件内存地址
++       * name dex文件名称
++       * fake_location 生成的dex文件路径
++       * verify 是否校验
++       * verify_checksum 是否校验校验和
++       * error_msg 错误信息
++       * error_code 错误码
++       */
+       std::unique_ptr<const DexFile> next_dex_file(OpenOneDexFileFromZip(zip_archive,
+                                                                          name.c_str(),
+                                                                          fake_location,
+diff --git a/runtime/class_linker.cc b/runtime/class_linker.cc
+index e21a004e33..8c72169087 100644
+--- a/runtime/class_linker.cc
++++ b/runtime/class_linker.cc
+@@ -1683,6 +1683,7 @@ static std::unique_ptr<const DexFile> OpenOatDexFile(const OatFile* oat_file,
+     return std::unique_ptr<const DexFile>();
+   }
+   std::string inner_error_msg;
++  //调用了OpenDexFile 进入查看
+   dex_file = oat_dex_file->OpenDexFile(&inner_error_msg);
+   if (dex_file == nullptr) {
+     *error_msg = StringPrintf("Failed to open dex file %s from within oat file %s error '%s'",
+@@ -1869,6 +1870,14 @@ static void VerifyAppImage(const ImageHeader& header,
+   }
+ }
+ 
++/**
++ * 1、通过获取本地的 oat文件的头信息，得到这个oat文件所有的缓存数据 存放到dex_caches中
++ * 2、遍历dex_caches的缓存数据 调用OpenOatDexFile 返回dex_file对象
++ * 3、将dex_file对象放到out_dex_files中 最后返回
++ * dex_location dex路径
++ * out_dex_files 被加载后保存的内存地址
++ */
++
+ bool ClassLinker::AddImageSpace(
+     gc::space::ImageSpace* space,
+     Handle<mirror::ClassLoader> class_loader,
+@@ -1899,10 +1908,12 @@ bool ClassLinker::AddImageSpace(
+     return false;
+   }
+   StackHandleScope<3> hs(self);
++  //通过获取本地的 oat文件的头信息，得到这个oat文件所有的缓存数据 存放到dex_caches中
+   Handle<mirror::ObjectArray<mirror::DexCache>> dex_caches(
+       hs.NewHandle(dex_caches_object->AsObjectArray<mirror::DexCache>()));
+   Handle<mirror::ObjectArray<mirror::Class>> class_roots(hs.NewHandle(
+       header.GetImageRoot(ImageHeader::kClassRoots)->AsObjectArray<mirror::Class>()));
++      //初始化classloader
+   MutableHandle<mirror::ClassLoader> image_class_loader(hs.NewHandle(
+       app_image ? header.GetImageRoot(ImageHeader::kAppImageClassLoader)->AsClassLoader()
+                 : nullptr));
+@@ -1922,15 +1933,17 @@ bool ClassLinker::AddImageSpace(
+     }
+   }
+   const OatFile* oat_file = space->GetOatFile();
++  //通过头信息获取dex数量
+   if (oat_file->GetOatHeader().GetDexFileCount() !=
+       static_cast<uint32_t>(dex_caches->GetLength())) {
+     *error_msg = "Dex cache count and dex file count mismatch while trying to initialize from "
+                  "image";
+     return false;
+   }
+-
++  //遍历dex_caches的缓存数据，获取dex_file指针 调用OpenOatDexFile 返回dex_file对象
+   for (auto dex_cache : dex_caches.Iterate<mirror::DexCache>()) {
+-    std::string dex_file_location = dex_cache->GetLocation()->ToModifiedUtf8();
++    std::string dex_file_location = dex_cache->GetLocation()->ToModifiedUtf8(); //获取dex文件本地址 To Utf8
++    //通过OpenOatDexFile 打开dex文件 返回dex_file对象
+     std::unique_ptr<const DexFile> dex_file = OpenOatDexFile(oat_file,
+                                                              dex_file_location.c_str(),
+                                                              error_msg);
+@@ -1950,12 +1963,15 @@ bool ClassLinker::AddImageSpace(
+       // Register dex files, keep track of existing ones that are conflicts.
+       AppendToBootClassPath(dex_file.get(), dex_cache);
+     }
++    //将dex_file添加到out_dex_files中
+     out_dex_files->push_back(std::move(dex_file));
+   }
+ 
++  //类加载器相关的
+   if (app_image) {
+     ScopedObjectAccessUnchecked soa(Thread::Current());
+     ScopedAssertNoThreadSuspension sants("Checking app image", soa.Self());
++    //判断当前的classloader是不是BootClassLoader
+     if (IsBootClassLoader(soa, image_class_loader.Get())) {
+       *error_msg = "Unexpected BootClassLoader in app image";
+       return false;
+@@ -1969,12 +1985,16 @@ bool ClassLinker::AddImageSpace(
+   }
+ 
+   // Set entry point to interpreter if in InterpretOnly mode.
++  //对atr的设置
++  //如果处于“仅解释模式” 则将入口点设置为解释器
+   if (!runtime->IsAotCompiler() && runtime->GetInstrumentation()->InterpretOnly()) {
+     // Set image methods' entry point to interpreter.
++    //将image方法的入口点设置为解释器
+     header.VisitPackedArtMethods([&](ArtMethod& method) REQUIRES_SHARED(Locks::mutator_lock_) {
+       if (!method.IsRuntimeMethod()) {
+         DCHECK(method.GetDeclaringClass() != nullptr);
+         if (!method.IsNative() && !method.IsResolutionMethod()) {
++          //设置方法执行模式
+           method.SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(),
+                                                             image_pointer_size_);
+         }
+diff --git a/runtime/native/dalvik_system_DexFile.cc b/runtime/native/dalvik_system_DexFile.cc
+index f8ad7f1b7a..9718acb135 100644
+--- a/runtime/native/dalvik_system_DexFile.cc
++++ b/runtime/native/dalvik_system_DexFile.cc
+@@ -304,6 +304,7 @@ static jobject DexFile_openInMemoryDexFilesNative(JNIEnv* env,
+ }
+ 
+ // TODO(calin): clean up the unused parameters (here and in libcore).
++//加载dex文件的入口
+ static jobject DexFile_openDexFileNative(JNIEnv* env,
+                                          jclass,
+                                          jstring javaSourceName,
+diff --git a/runtime/oat_file.cc b/runtime/oat_file.cc
+index 14e7a1b60e..4fafc7eb05 100644
+--- a/runtime/oat_file.cc
++++ b/runtime/oat_file.cc
+@@ -2158,6 +2158,7 @@ size_t OatDexFile::FileSize() const {
+   return reinterpret_cast<const DexFile::Header*>(dex_file_pointer_)->file_size_;
+ }
+ 
++//----->
+ std::unique_ptr<const DexFile> OatDexFile::OpenDexFile(std::string* error_msg) const {
+   ScopedTrace trace(__PRETTY_FUNCTION__);
+   static constexpr bool kVerify = false;
+diff --git a/runtime/oat_file_manager.cc b/runtime/oat_file_manager.cc
+index 542ea092ff..8c2c18b079 100644
+--- a/runtime/oat_file_manager.cc
++++ b/runtime/oat_file_manager.cc
+@@ -165,6 +165,11 @@ bool OatFileManager::ShouldLoadAppImage(const OatFile* source_oat_file) const {
+   return kEnableAppImage && (!runtime->IsJavaDebuggable() || source_oat_file->IsDebuggable());
+ }
+ 
++/** 
++ * dex_location 本地dex 文件路径
++ * out_oat_file被加载过后的数据保存的内存地址
++ * class_loader 应用类加载器对象
++ */
+ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+     const char* dex_location,
+     jobject class_loader,
+@@ -191,6 +196,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+     LOG(WARNING) << "Opening an oat file without a class loader. "
+                  << "Are you using the deprecated DexFile APIs?";
+   } else if (context != nullptr) {
++    //创建oat_file_assistant对象，判断指令集是否匹配
+     OatFileAssistant oat_file_assistant(dex_location,
+                                         kRuntimeISA,
+                                         context.get(),
+@@ -225,6 +231,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+         compilation_reason.c_str()));
+ 
+     // Proceed with oat file loading.
++    //获取磁盘上的oat文件 类型为OatFile
+     std::unique_ptr<const OatFile> oat_file(oat_file_assistant.GetBestOatFile().release());
+     VLOG(oat) << "OatFileAssistant(" << dex_location << ").GetBestOatFile()="
+               << (oat_file != nullptr ? oat_file->GetLocation() : "")
+@@ -238,6 +245,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+     if (oat_file != nullptr) {
+       // Load the dex files from the oat file.
+       bool added_image_space = false;
++      //判断文件是否是可执行文件
+       if (oat_file->IsExecutable()) {
+         ScopedTrace app_image_timing("AppImage:Loading");
+ 
+@@ -245,14 +253,17 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+         // image is not otherwise we might get classes with inlined methods or other such things.
+         std::unique_ptr<gc::space::ImageSpace> image_space;
+         if (ShouldLoadAppImage(oat_file.get())) {
++          //打开oat文件
+           image_space = oat_file_assistant.OpenImageSpace(oat_file.get());
+         }
+         if (image_space != nullptr) {
+           ScopedObjectAccess soa(self);
+           StackHandleScope<1> hs(self);
++          //判断有没有类加载器
+           Handle<mirror::ClassLoader> h_loader(
+               hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
+-          // Can not load app image without class loader.
++          // Can not load app image without class loader
++          //有类加载器加载应用程序映像.
+           if (h_loader != nullptr) {
+             std::string temp_error_msg;
+             // Add image space has a race condition since other threads could be reading from the
+@@ -263,25 +274,30 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+                                               gc::kGcCauseAddRemoveAppImageSpace,
+                                               gc::kCollectorTypeAddRemoveAppImageSpace);
+               ScopedSuspendAll ssa("Add image space");
++              //将oat镜像空间添加到堆
+               runtime->GetHeap()->AddSpace(image_space.get());
+             }
+             {
+               ScopedTrace image_space_timing("Adding image space");
++              //加载dex数据 进去看一下
+               added_image_space = runtime->GetClassLinker()->AddImageSpace(image_space.get(),
+                                                                            h_loader,
+                                                                            /*out*/&dex_files,
+                                                                            /*out*/&temp_error_msg);
+             }
++            //如果成功加载了就考虑释放资源的问题
+             if (added_image_space) {
+               // Successfully added image space to heap, release the map so that it does not get
+               // freed.
+               image_space.release();  // NOLINT b/117926937
+ 
+               // Register for tracking.
++              //对加载过的dex_file进行注册
+               for (const auto& dex_file : dex_files) {
+                 dex::tracking::RegisterDexFile(dex_file.get());
+               }
+             } else {
++              //清理dex_file
+               LOG(INFO) << "Failed to add image file " << temp_error_msg;
+               dex_files.clear();
+               {
+@@ -318,26 +334,31 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+             LOG(WARNING) << "Failed to reload oat file non-executable " << dex_location;
+           }
+         }
+-
++        //如果classlinker添加失败，就重新添加一次
+         if (oat_file != nullptr) {
++          //这个加载方式比较简单 oat_file_assistant.LoadDexFiles 依旧是加载的oat文件
+           dex_files = oat_file_assistant.LoadDexFiles(*oat_file.get(), dex_location);
+ 
+           // Register for tracking.
++          //注册操作
+           for (const auto& dex_file : dex_files) {
+             dex::tracking::RegisterDexFile(dex_file.get());
+           }
+         }
+       }
++      //没有加载成功
+       if (dex_files.empty()) {
+         ScopedTrace failed_to_open_dex_files("FailedToOpenDexFilesFromOat");
++        //错误消息
+         error_msgs->push_back("Failed to open dex files from " + odex_location);
+       } else {
+         // Opened dex files from an oat file, madvise them to their loaded state.
+          for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
++          //从oat文件打开dex文件，将其恢复到加载状态
+            OatDexFile::MadviseDexFile(*dex_file, MadviseState::kMadviseStateAtLoad);
+          }
+       }
+-
++    //恢复加载状态
+       if (oat_file != nullptr) {
+         VLOG(class_linker) << "Registering " << oat_file->GetLocation();
+         *out_oat_file = RegisterOatFile(std::move(oat_file));
+@@ -348,6 +369,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+       // If so, report an error with the current stack trace.
+       // Most likely the developer didn't intend to do this because it will waste
+       // performance and memory.
++      //没有.oat文件
+       if (oat_file_assistant.GetBestStatus() == OatFileAssistant::kOatContextOutOfDate) {
+         std::set<const DexFile*> already_exists_in_classpath =
+             context->CheckForDuplicateDexFiles(MakeNonOwningPointerVector(dex_files));
+@@ -385,10 +407,19 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+ 
+   // If we arrive here with an empty dex files list, it means we fail to load
+   // it/them through an .oat file.
++  //加载dex文件
++  //如果阻断了dex2oat文件生成，OpenDexFilesFromOat函数就会走到以下流程去加载Dex文件，通过调用DexFile::Open最终又会走到openCommon函数
+   if (dex_files.empty()) {
+     std::string error_msg;
+     static constexpr bool kVerifyChecksum = true;
+     const ArtDexFileLoader dex_file_loader;
++    /** 打开dex文件
++     * dex_location 类的名字
++     * dex_location dexpath类的名字
++     * IsVerificationEnabled() 验证
++     * kVerifyChecksum 签名校验
++     * dex_files 指针地址 null 用于保存加载后的dex数据
++     */
+     if (!dex_file_loader.Open(dex_location,
+                               dex_location,
+                               Runtime::Current()->IsVerificationEnabled(),
+@@ -409,7 +440,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+   // Now that we loaded the dex/odex files, notify the runtime.
+   // Note that we do this everytime we load dex files.
+   Runtime::Current()->NotifyDexFileLoaded();
+-
++  //返回最终的加载结果
+   return dex_files;
+ }
+ 

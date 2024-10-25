@@ -1,0 +1,1423 @@
+diff --git a/core/java/android/app/ActivityThread.java b/core/java/android/app/ActivityThread.java
+index fc4bb1a00da5..b04600401320 100644
+--- a/core/java/android/app/ActivityThread.java
++++ b/core/java/android/app/ActivityThread.java
+@@ -6619,7 +6619,7 @@ public final class ActivityThread extends ClientTransactionHandler
+         } else {
+             ii = null;
+         }
+-
++        //创建应用Application的Context，触发Art虚拟机加载应用APK的Dex文件到内存中，并加载APK的Resource资源
+         final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
+         mConfigurationController.updateLocaleListFromAppContext(appContext);
+ 
+@@ -6660,6 +6660,7 @@ public final class ActivityThread extends ClientTransactionHandler
+ 
+         // Continue loading instrumentation.
+         if (ii != null) {
++            //初始化应用资源 验证包名，加载、定义链接类和方法
+             initInstrumentation(ii, data, appContext);
+         } else {
+             mInstrumentation = new Instrumentation();
+@@ -6674,15 +6675,19 @@ public final class ActivityThread extends ClientTransactionHandler
+             dalvik.system.VMRuntime.getRuntime().clampGrowthLimit();
+         }
+ 
++        //脱壳点
++
+         // Allow disk access during application and provider setup. This could
+         // block processing ordered broadcasts, but later processing would
+         // probably end up doing the same disk access.
++        // 从这里开始，开始执行app的onCreate方法---->frida 持久化放到执行之前
+         Application app;
+         final StrictMode.ThreadPolicy savedPolicy = StrictMode.allowThreadDiskWrites();
+         final StrictMode.ThreadPolicy writesAllowedPolicy = StrictMode.getThreadPolicy();
+         try {
+             // If the app is being launched for full backup or restore, bring it up in
+             // a restricted environment with the base application class.
++            //在这里创建了Application对象 app对象，app context 全局对象
+             app = data.info.makeApplication(data.restrictedBackupMode, null);
+ 
+             // Propagate autofill compat state
+@@ -6722,7 +6727,7 @@ public final class ActivityThread extends ClientTransactionHandler
+                     + data.instrumentationName + ": " + e.toString(), e);
+             }
+             try {
+-                mInstrumentation.callApplicationOnCreate(app);
++                mInstrumentation.callApplicationOnCreate(app); //正式调用app的onCreate方法
+             } catch (Exception e) {
+                 if (!mInstrumentation.onException(app, e)) {
+                     throw new RuntimeException(
+@@ -6866,13 +6871,15 @@ public final class ActivityThread extends ClientTransactionHandler
+         // The test context's op package name == the target app's op package name, because
+         // the app ops manager checks the op package name against the real calling UID,
+         // which is what the target package name is associated with.
++        //通过传入应用包名，验证应用程序名字
+         final ContextImpl instrContext = ContextImpl.createAppContext(this, pi,
+                 appContext.getOpPackageName());
+ 
+         try {
+             final ClassLoader cl = instrContext.getClassLoader();
+             mInstrumentation = (Instrumentation)
+-                    cl.loadClass(data.instrumentationName.getClassName()).newInstance();
++                    cl.loadClass(data.instrumentationName.getClassName()).newInstance();//加载类 并且创建对象
++                    //最终调用defineClass 定义类，提供执行条件
+         } catch (Exception e) {
+             throw new RuntimeException(
+                     "Unable to instantiate instrumentation "
+@@ -7512,11 +7519,15 @@ public final class ActivityThread extends ClientTransactionHandler
+         mConfigurationController = new ConfigurationController(this);
+         mSystemThread = system;
+         if (!system) {
++            //非系统APP
+             android.ddm.DdmHandleAppName.setAppName("<pre-initialized>",
+                                                     UserHandle.myUserId());
+             RuntimeInit.setApplicationObject(mAppThread.asBinder());
+-            final IActivityManager mgr = ActivityManager.getService();
++            final IActivityManager mgr = ActivityManager.getService(); //获得IActivityManager对象
+             try {
++                //调用IActivityManager的attachApplication方法
++                //ActivityManagerService继承了IActivityManager接口
++                //这里调用的是AMS中的
+                 mgr.attachApplication(mAppThread, startSeq);
+             } catch (RemoteException ex) {
+                 throw ex.rethrowFromSystemServer();
+@@ -7544,6 +7555,7 @@ public final class ActivityThread extends ClientTransactionHandler
+                 }
+             });
+         } else {
++            //系统APP
+             // Don't set application object here -- if the system crashes,
+             // we can't display an alert, we just want to die die die.
+             android.ddm.DdmHandleAppName.setAppName("system_process",
+@@ -7786,7 +7798,7 @@ public final class ActivityThread extends ClientTransactionHandler
+             }
+         }
+     }
+-
++    //普通App进程的启动入口
+     public static void main(String[] args) {
+         Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "ActivityThreadMain");
+ 
+diff --git a/core/java/android/app/ApplicationLoaders.java b/core/java/android/app/ApplicationLoaders.java
+index 08cd0b34ee0a..5d10d37414c5 100644
+--- a/core/java/android/app/ApplicationLoaders.java
++++ b/core/java/android/app/ApplicationLoaders.java
+@@ -89,6 +89,8 @@ public class ApplicationLoaders {
+               nativeSharedLibraries);
+     }
+ 
++    //函数在app的运行过程中会被频繁调用，用于加载系统框架类，和应用dex类，
++    //分成了两种加载方式，但是最终到ART内部加载类时走的都是同一套方法
+     private ClassLoader getClassLoader(String zip, int targetSdkVersion, boolean isBundled,
+                                        String librarySearchPath, String libraryPermittedPath,
+                                        ClassLoader parent, String cacheKey,
+@@ -100,6 +102,7 @@ public class ApplicationLoaders {
+          * don't use that and can happily (and more efficiently) use the
+          * bootstrap class loader.
+          */
++        //返回一个BootStrapClassLoader对象 SystemlClassLoader->BootStrapClassLoader
+         ClassLoader baseParent = ClassLoader.getSystemClassLoader().getParent();
+ 
+         synchronized (mLoaders) {
+@@ -119,7 +122,7 @@ public class ApplicationLoaders {
+                 }
+ 
+                 Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, zip);
+-
++                //创建一个BootClassLoader加载系统框架类
+                 ClassLoader classloader = ClassLoaderFactory.createClassLoader(
+                         zip,  librarySearchPath, libraryPermittedPath, parent,
+                         targetSdkVersion, isBundled, classLoaderName, sharedLibraries,
+@@ -139,6 +142,7 @@ public class ApplicationLoaders {
+             }
+ 
+             Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, zip);
++            //创建PathClassLoader加载应用APK的dex类
+             ClassLoader loader = ClassLoaderFactory.createClassLoader(
+                     zip, null, parent, classLoaderName, sharedLibraries);
+             Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+diff --git a/core/java/android/app/ContextImpl.java b/core/java/android/app/ContextImpl.java
+index 1397f5ea10dc..9a1d62977dcd 100644
+--- a/core/java/android/app/ContextImpl.java
++++ b/core/java/android/app/ContextImpl.java
+@@ -3011,7 +3011,7 @@ class ContextImpl extends Context {
+         if (packageInfo == null) throw new IllegalArgumentException("packageInfo");
+         ContextImpl context = new ContextImpl(null, mainThread, packageInfo,
+             ContextParams.EMPTY, null, null, null, null, null, 0, null, opPackageName);
+-        context.setResources(packageInfo.getResources());
++        context.setResources(packageInfo.getResources());// 设置资源
+         context.mContextType = isSystemOrSystemUI(context) ? CONTEXT_TYPE_SYSTEM_OR_SYSTEM_UI
+                 : CONTEXT_TYPE_NON_UI;
+         return context;
+diff --git a/core/java/android/app/LoadedApk.java b/core/java/android/app/LoadedApk.java
+index a2c9795204ad..a82f80195d80 100644
+--- a/core/java/android/app/LoadedApk.java
++++ b/core/java/android/app/LoadedApk.java
+@@ -769,7 +769,7 @@ public final class LoadedApk {
+ 
+     @GuardedBy("mLock")
+     private void createOrUpdateClassLoaderLocked(List<String> addedPaths) {
+-        if (mPackageName.equals("android")) {
++        if (mPackageName.equals("android")) { //系统app的classloader
+             // Note: This branch is taken for system server and we don't need to setup
+             // jit profiling support.
+             if (mClassLoader != null) {
+@@ -906,6 +906,7 @@ public final class LoadedApk {
+         if (!mIncludeCode) {
+             if (mDefaultClassLoader == null) {
+                 StrictMode.ThreadPolicy oldPolicy = allowThreadDiskReads();
++                //创建默认的mDefaultClassLoader对象
+                 mDefaultClassLoader = ApplicationLoaders.getDefault().getClassLoader(
+                         "" /* codePath */, mApplicationInfo.targetSdkVersion, isBundledApp,
+                         librarySearchPath, libraryPermittedPath, mBaseClassLoader,
+@@ -1291,7 +1292,7 @@ public final class LoadedApk {
+ 
+     @UnsupportedAppUsage
+     public Resources getResources() {
+-        if (mResources == null) {
++        if (mResources == null) { //第一次加载时为null
+             final String[] splitPaths;
+             try {
+                 splitPaths = getSplitPaths(null);
+@@ -1304,6 +1305,7 @@ public final class LoadedApk {
+                 ResourcesManager.getInstance().initializeApplicationPaths(mResDir, splitPaths);
+             }
+ 
++            //触发加载APK的Dex文件
+             mResources = ResourcesManager.getInstance().getResources(null, mResDir,
+                     splitPaths, mLegacyOverlayDirs, mOverlayPaths,
+                     mApplicationInfo.sharedLibraryFiles, null, null, getCompatibilityInfo(),
+diff --git a/core/java/com/android/internal/os/ClassLoaderFactory.java b/core/java/com/android/internal/os/ClassLoaderFactory.java
+index d347f2e21dd2..946132e62f6f 100644
+--- a/core/java/com/android/internal/os/ClassLoaderFactory.java
++++ b/core/java/com/android/internal/os/ClassLoaderFactory.java
+@@ -85,6 +85,7 @@ public class ClassLoaderFactory {
+                 ? null
+                 : sharedLibraries.toArray(new ClassLoader[sharedLibraries.size()]);
+         if (isPathClassLoaderName(classloaderName)) {
++            //创建app类加载器 最终加载其内部调用加载dex文件，5个参数
+             return new PathClassLoader(dexPath, librarySearchPath, parent, arrayOfSharedLibraries);
+         } else if (isDelegateLastClassLoaderName(classloaderName)) {
+             return new DelegateLastClassLoader(dexPath, librarySearchPath, parent,
+diff --git a/core/java/com/android/internal/os/RuntimeInit.java b/core/java/com/android/internal/os/RuntimeInit.java
+index 8d1f16b4b259..2ec24aba1243 100644
+--- a/core/java/com/android/internal/os/RuntimeInit.java
++++ b/core/java/com/android/internal/os/RuntimeInit.java
+@@ -30,20 +30,16 @@ import android.os.SystemProperties;
+ import android.os.Trace;
+ import android.util.Log;
+ import android.util.Slog;
+-
+ import com.android.internal.logging.AndroidConfig;
+ import com.android.server.NetworkManagementSocketTagger;
+-
+ import dalvik.system.RuntimeHooks;
+ import dalvik.system.VMRuntime;
+-
+-import libcore.content.type.MimeMap;
+-
+ import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
+ import java.util.Objects;
+ import java.util.logging.LogManager;
++import libcore.content.type.MimeMap;
+ 
+ /**
+  * Main entry point for runtime initialization.  Not for
+@@ -55,11 +51,9 @@ public class RuntimeInit {
+     final static boolean DEBUG = false;
+ 
+     /** true if commonInit() has been called */
+-    @UnsupportedAppUsage
+-    private static boolean initialized;
++    @UnsupportedAppUsage private static boolean initialized;
+ 
+-    @UnsupportedAppUsage
+-    private static IBinder mApplicationObject;
++    @UnsupportedAppUsage private static IBinder mApplicationObject;
+ 
+     private static volatile boolean mCrashing = false;
+ 
+@@ -98,7 +92,8 @@ public class RuntimeInit {
+             mTriggered = true;
+ 
+             // Don't re-enter if KillApplicationHandler has already run
+-            if (mCrashing) return;
++            if (mCrashing)
++                return;
+ 
+             // mApplicationObject is null for non-zygote java programs (e.g. "am")
+             // There are also apps running with the system UID. We don't want the
+@@ -142,7 +137,8 @@ public class RuntimeInit {
+                 ensureLogging(t, e);
+ 
+                 // Don't re-enter -- avoid infinite loops if crash-reporting crashes.
+-                if (mCrashing) return;
++                if (mCrashing)
++                    return;
+                 mCrashing = true;
+ 
+                 // Try to end profiling. If a profiler is running at this point, and we kill the
+@@ -205,7 +201,8 @@ public class RuntimeInit {
+      * the Zygote fork.
+      */
+     public static void preForkInit() {
+-        if (DEBUG) Slog.d(TAG, "Entered preForkInit.");
++        if (DEBUG)
++            Slog.d(TAG, "Entered preForkInit.");
+         RuntimeInit.enableDdms();
+         // TODO(b/142019040#comment13): Decide whether to load the default instance eagerly, i.e.
+         // MimeMap.setDefault(DefaultMimeMapFactory.create());
+@@ -220,7 +217,8 @@ public class RuntimeInit {
+ 
+     @UnsupportedAppUsage
+     protected static final void commonInit() {
+-        if (DEBUG) Slog.d(TAG, "Entered RuntimeInit!");
++        if (DEBUG)
++            Slog.d(TAG, "Entered RuntimeInit!");
+ 
+         /*
+          * set handlers; these apply to all threads in the VM. Apps can replace
+@@ -298,33 +296,31 @@ public class RuntimeInit {
+      * @param argv Argument vector for main()
+      * @param classLoader the classLoader to load {@className} with
+      */
+-    protected static Runnable findStaticMain(String className, String[] argv,
+-            ClassLoader classLoader) {
++    protected static Runnable findStaticMain(
++            String className, String[] argv, ClassLoader classLoader) {
+         Class<?> cl;
+ 
+         try {
++            Slog.d("Jiang", "findStaticMain:" + className);
++            //根据类名查找类，android.app.ActivityThread 是否初始化类 true是初始化
+             cl = Class.forName(className, true, classLoader);
+         } catch (ClassNotFoundException ex) {
+-            throw new RuntimeException(
+-                    "Missing class when invoking static main " + className,
+-                    ex);
++            throw new RuntimeException("Missing class when invoking static main " + className, ex);
+         }
+ 
+         Method m;
+         try {
+-            m = cl.getMethod("main", new Class[] { String[].class });
++            //参数传入方法名，方法参数
++            m = cl.getMethod("main", new Class[] {String[].class});
+         } catch (NoSuchMethodException ex) {
+-            throw new RuntimeException(
+-                    "Missing static main on " + className, ex);
++            throw new RuntimeException("Missing static main on " + className, ex);
+         } catch (SecurityException ex) {
+-            throw new RuntimeException(
+-                    "Problem getting static main on " + className, ex);
++            throw new RuntimeException("Problem getting static main on " + className, ex);
+         }
+ 
+         int modifiers = m.getModifiers();
+-        if (! (Modifier.isStatic(modifiers) && Modifier.isPublic(modifiers))) {
+-            throw new RuntimeException(
+-                    "Main method is not public and static on " + className);
++        if (!(Modifier.isStatic(modifiers) && Modifier.isPublic(modifiers))) {
++            throw new RuntimeException("Main method is not public and static on " + className);
+         }
+ 
+         /*
+@@ -333,6 +329,12 @@ public class RuntimeInit {
+          * clears up all the stack frames that were required in setting
+          * up the process.
+          */
++        //最后返回的是一个runnable接口实现类，而这个runnable中实现了调用ActiityThread中main方法的逻辑
++        /**
++         * m: Method对象地址
++         * argv 方法参数
++         * android.app.ActivityThread main(String[] argv) 应用的入口函数
++         */
+         return new MethodAndArgsCaller(m, argv);
+     }
+ 
+@@ -340,10 +342,12 @@ public class RuntimeInit {
+     public static final void main(String[] argv) {
+         preForkInit();
+         if (argv.length == 2 && argv[1].equals("application")) {
+-            if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting application");
++            if (DEBUG)
++                Slog.d(TAG, "RuntimeInit: Starting application");
+             redirectLogStreams();
+         } else {
+-            if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting tool");
++            if (DEBUG)
++                Slog.d(TAG, "RuntimeInit: Starting tool");
+         }
+ 
+         commonInit();
+@@ -354,7 +358,8 @@ public class RuntimeInit {
+          */
+         nativeFinishInit();
+ 
+-        if (DEBUG) Slog.d(TAG, "Leaving RuntimeInit!");
++        if (DEBUG)
++            Slog.d(TAG, "Leaving RuntimeInit!");
+     }
+ 
+     protected static Runnable applicationInit(int targetSdkVersion, long[] disabledCompatChanges,
+@@ -373,8 +378,15 @@ public class RuntimeInit {
+ 
+         // The end of of the RuntimeInit event (see #zygoteInit).
+         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+-
+         // Remaining arguments are passed to the start class's static main
++
++        //  根据传入的类名，查找类的main方法
++
++        /**
++         * args.startClass : 需要查找的类
++         * args.startArgs : 需要传递给main方法的参数
++         * classLoader : 需要查找类的ClassLoader
++         */
+         return findStaticMain(args.startClass, args.startArgs, classLoader);
+     }
+ 
+@@ -400,18 +412,14 @@ public class RuntimeInit {
+             boolean exit = false;
+             final IActivityManager am = ActivityManager.getService();
+             if (am != null) {
+-                exit = am.handleApplicationWtf(
+-                        mApplicationObject, tag, system,
+-                        new ApplicationErrorReport.ParcelableCrashInfo(t),
+-                        Process.myPid());
++                exit = am.handleApplicationWtf(mApplicationObject, tag, system,
++                        new ApplicationErrorReport.ParcelableCrashInfo(t), Process.myPid());
+             } else {
+                 // Unlikely but possible in early system boot
+                 final ApplicationWtfHandler handler = sDefaultApplicationWtfHandler;
+                 if (handler != null) {
+-                    exit = handler.handleApplicationWtf(
+-                            mApplicationObject, tag, system,
+-                            new ApplicationErrorReport.ParcelableCrashInfo(t),
+-                            Process.myPid());
++                    exit = handler.handleApplicationWtf(mApplicationObject, tag, system,
++                            new ApplicationErrorReport.ParcelableCrashInfo(t), Process.myPid());
+                 } else {
+                     // Simply log the error
+                     Slog.e(TAG, "Original WTF:", t);
+@@ -459,9 +467,7 @@ public class RuntimeInit {
+      * Set the object identifying this application/process, for reporting VM
+      * errors.
+      */
+-    public static final void setApplicationObject(IBinder app) {
+-        mApplicationObject = app;
+-    }
++    public static final void setApplicationObject(IBinder app) { mApplicationObject = app; }
+ 
+     @UnsupportedAppUsage
+     public static final IBinder getApplicationObject() {
+@@ -496,15 +502,12 @@ public class RuntimeInit {
+          * @param args runtime command-line args
+          * @throws IllegalArgumentException
+          */
+-        Arguments(String args[]) throws IllegalArgumentException {
+-            parseArgs(args);
+-        }
++        Arguments(String args[]) throws IllegalArgumentException { parseArgs(args); }
+ 
+         /**
+          * Parses the commandline arguments intended for the Runtime.
+          */
+-        private void parseArgs(String args[])
+-                throws IllegalArgumentException {
++        private void parseArgs(String args[]) throws IllegalArgumentException {
+             int curArg = 0;
+             for (; curArg < args.length; curArg++) {
+                 String arg = args[curArg];
+@@ -545,15 +548,16 @@ public class RuntimeInit {
+ 
+         public void run() {
+             try {
+-                mMethod.invoke(null, new Object[] { mArgs });
++                //进行调用
++                mMethod.invoke(null, new Object[] {mArgs});
+             } catch (IllegalAccessException ex) {
+                 throw new RuntimeException(ex);
+             } catch (InvocationTargetException ex) {
+                 Throwable cause = ex.getCause();
+                 if (cause instanceof RuntimeException) {
+-                    throw (RuntimeException) cause;
++                    throw(RuntimeException) cause;
+                 } else if (cause instanceof Error) {
+-                    throw (Error) cause;
++                    throw(Error) cause;
+                 }
+                 throw new RuntimeException(ex);
+             }
+diff --git a/core/java/com/android/internal/os/ZygoteConnection.java b/core/java/com/android/internal/os/ZygoteConnection.java
+index 993e4e7b4b3d..8a18a11faf6f 100644
+--- a/core/java/com/android/internal/os/ZygoteConnection.java
++++ b/core/java/com/android/internal/os/ZygoteConnection.java
+@@ -19,7 +19,6 @@ package com.android.internal.os;
+ import static android.system.OsConstants.F_SETFD;
+ import static android.system.OsConstants.O_CLOEXEC;
+ import static android.system.OsConstants.POLLIN;
+-
+ import static com.android.internal.os.ZygoteConnectionConstants.CONNECTION_TIMEOUT_MILLIS;
+ import static com.android.internal.os.ZygoteConnectionConstants.WRAPPED_PID_TIMEOUT_MILLIS;
+ 
+@@ -34,12 +33,8 @@ import android.system.ErrnoException;
+ import android.system.Os;
+ import android.system.StructPollfd;
+ import android.util.Log;
+-
+ import dalvik.system.VMRuntime;
+ import dalvik.system.ZygoteHooks;
+-
+-import libcore.io.IoUtils;
+-
+ import java.io.ByteArrayInputStream;
+ import java.io.DataInputStream;
+ import java.io.DataOutputStream;
+@@ -48,6 +43,7 @@ import java.io.IOException;
+ import java.nio.charset.StandardCharsets;
+ import java.util.Base64;
+ import java.util.concurrent.TimeUnit;
++import libcore.io.IoUtils;
+ 
+ /**
+  * A connection that can make spawn requests.
+@@ -62,12 +58,9 @@ class ZygoteConnection {
+      * that it closes when the child process terminates. In other cases,
+      * it is closed in the peer.
+      */
+-    @UnsupportedAppUsage
+-    private final LocalSocket mSocket;
+-    @UnsupportedAppUsage
+-    private final DataOutputStream mSocketOutStream;
+-    @UnsupportedAppUsage
+-    private final Credentials peer;
++    @UnsupportedAppUsage private final LocalSocket mSocket;
++    @UnsupportedAppUsage private final DataOutputStream mSocketOutStream;
++    @UnsupportedAppUsage private final Credentials peer;
+     private final String abiList;
+     private boolean isEof;
+ 
+@@ -101,9 +94,7 @@ class ZygoteConnection {
+      *
+      * @return null-ok; file descriptor
+      */
+-    FileDescriptor getFileDescriptor() {
+-        return mSocket.getFileDescriptor();
+-    }
++    FileDescriptor getFileDescriptor() { return mSocket.getFileDescriptor(); }
+ 
+     /**
+      * Reads a command from the command socket. If a child is successfully forked, a
+@@ -149,8 +140,7 @@ class ZygoteConnection {
+                     return null;
+                 }
+ 
+-                if (parsedArgs.mUsapPoolStatusSpecified
+-                        || parsedArgs.mApiDenylistExemptions != null
++                if (parsedArgs.mUsapPoolStatusSpecified || parsedArgs.mApiDenylistExemptions != null
+                         || parsedArgs.mHiddenApiAccessLogSampleRate != -1
+                         || parsedArgs.mHiddenApiAccessStatslogSampleRate != -1) {
+                     // Handle these once we've released argBuffer, to avoid opening a second one.
+@@ -163,8 +153,7 @@ class ZygoteConnection {
+                 }
+ 
+                 if (parsedArgs.mPreloadPackage != null) {
+-                    handlePreloadPackage(parsedArgs.mPreloadPackage,
+-                            parsedArgs.mPreloadPackageLibs,
++                    handlePreloadPackage(parsedArgs.mPreloadPackage, parsedArgs.mPreloadPackageLibs,
+                             parsedArgs.mPreloadPackageLibFileName,
+                             parsedArgs.mPreloadPackageCacheKey);
+                     return null;
+@@ -214,10 +203,10 @@ class ZygoteConnection {
+                         childPipeFd = pipeFds[1];
+                         serverPipeFd = pipeFds[0];
+                         Os.fcntlInt(childPipeFd, F_SETFD, 0);
+-                        fdsToIgnore = new int[]{childPipeFd.getInt$(), serverPipeFd.getInt$()};
++                        fdsToIgnore = new int[] {childPipeFd.getInt$(), serverPipeFd.getInt$()};
+                     } catch (ErrnoException errnoEx) {
+-                        throw new IllegalStateException("Unable to set up pipe for invoke-with",
+-                                errnoEx);
++                        throw new IllegalStateException(
++                                "Unable to set up pipe for invoke-with", errnoEx);
+                     }
+                 }
+ 
+@@ -233,7 +222,7 @@ class ZygoteConnection {
+                  * the socket and substitutes an open descriptor to /dev/null.
+                  */
+ 
+-                int [] fdsToClose = { -1, -1 };
++                int[] fdsToClose = {-1, -1};
+ 
+                 FileDescriptor fd = mSocket.getFileDescriptor();
+ 
+@@ -247,9 +236,16 @@ class ZygoteConnection {
+                     fdsToClose[1] = zygoteFd.getInt$();
+                 }
+ 
+-                if (parsedArgs.mInvokeWith != null || parsedArgs.mStartChildZygote
+-                        || !multipleOK || peer.getUid() != Process.SYSTEM_UID) {
++                if (parsedArgs.mInvokeWith != null || parsedArgs.mStartChildZygote || !multipleOK
++                        || peer.getUid() != Process.SYSTEM_UID) {
+                     // Continue using old code for now. TODO: Handle these cases in the other path.
++                    //创建子进程并返回pid，最终调用linux命令fork()创建一个进程
++                    // fork()特点：
++                    //调用一次返回两次，返回值有三种类型
++                    //父进程：fork返回新创建的子进程pid（因为会考虑父进程杀子进程或查看子进程信息
++                    //所以返回子进程pid）
++                    //子进程：fork返回0
++                    //当出现错误：fork()返回的是负数，当进程数超过上限或者系统内存不足时会出错
+                     pid = Zygote.forkAndSpecialize(parsedArgs.mUid, parsedArgs.mGid,
+                             parsedArgs.mGids, parsedArgs.mRuntimeFlags, rlimits,
+                             parsedArgs.mMountExternal, parsedArgs.mSeInfo, parsedArgs.mNiceName,
+@@ -262,14 +258,16 @@ class ZygoteConnection {
+                     try {
+                         if (pid == 0) {
+                             // in child
+-                            zygoteServer.setForkChild();
+-
++                            zygoteServer.setForkChild(); //设置子进程的服务
+                             zygoteServer.closeServerSocket();
++                            //关闭套接字链接，进程被创建后，父进程就不管了，剩下的事情时子进程的事
++                            //子进程使用自己的zygoteServer 启动自己的app
++                            //父进程开放权利，继续监听有没有要启动的app
+                             IoUtils.closeQuietly(serverPipeFd);
+                             serverPipeFd = null;
+-
+-                            return handleChildProc(parsedArgs, childPipeFd,
+-                                    parsedArgs.mStartChildZygote);
++                            //处于APP进程的状态 开始处理子程序
++                            return handleChildProc(
++                                    parsedArgs, childPipeFd, parsedArgs.mStartChildZygote);
+                         } else {
+                             // In the parent. A pid < 0 indicates a failure and will be handled in
+                             // handleParentProc.
+@@ -285,8 +283,8 @@ class ZygoteConnection {
+                 } else {
+                     ZygoteHooks.preFork();
+                     Runnable result = Zygote.forkSimpleApps(argBuffer,
+-                            zygoteServer.getZygoteSocketFileDescriptor(),
+-                            peer.getUid(), Zygote.minChildUid(peer), parsedArgs.mNiceName);
++                            zygoteServer.getZygoteSocketFileDescriptor(), peer.getUid(),
++                            Zygote.minChildUid(peer), parsedArgs.mNiceName);
+                     if (result == null) {
+                         // parent; we finished some number of forks. Result is Boolean.
+                         // We already did the equivalent of handleParentProc().
+@@ -296,7 +294,7 @@ class ZygoteConnection {
+                     } else {
+                         // child; result is a Runnable.
+                         zygoteServer.setForkChild();
+-                        Zygote.setAppProcessName(parsedArgs, TAG);  // ??? Necessary?
++                        Zygote.setAppProcessName(parsedArgs, TAG); // ??? Necessary?
+                         return result;
+                     }
+                 }
+@@ -307,8 +305,7 @@ class ZygoteConnection {
+             return handleUsapPoolStatusChange(zygoteServer, parsedArgs.mUsapPoolEnabled);
+         }
+         if (parsedArgs.mApiDenylistExemptions != null) {
+-            return handleApiDenylistExemptions(zygoteServer,
+-                    parsedArgs.mApiDenylistExemptions);
++            return handleApiDenylistExemptions(zygoteServer, parsedArgs.mApiDenylistExemptions);
+         }
+         if (parsedArgs.mHiddenApiAccessLogSampleRate != -1
+                 || parsedArgs.mHiddenApiAccessStatslogSampleRate != -1) {
+@@ -369,8 +366,8 @@ class ZygoteConnection {
+         }
+     }
+ 
+-    private Runnable stateChangeWithUsapPoolReset(ZygoteServer zygoteServer,
+-            Runnable stateChangeCode) {
++    private Runnable stateChangeWithUsapPoolReset(
++            ZygoteServer zygoteServer, Runnable stateChangeCode) {
+         try {
+             if (zygoteServer.isUsapPoolEnabled()) {
+                 Log.i(TAG, "Emptying USAP Pool due to state change.");
+@@ -380,9 +377,8 @@ class ZygoteConnection {
+             stateChangeCode.run();
+ 
+             if (zygoteServer.isUsapPoolEnabled()) {
+-                Runnable fpResult =
+-                        zygoteServer.fillUsapPool(
+-                                new int[]{mSocket.getFileDescriptor().getInt$()}, false);
++                Runnable fpResult = zygoteServer.fillUsapPool(
++                        new int[] {mSocket.getFileDescriptor().getInt$()}, false);
+ 
+                 if (fpResult != null) {
+                     zygoteServer.setForkChild();
+@@ -415,8 +411,8 @@ class ZygoteConnection {
+      *         zygote process will always receive a null value from this function.
+      */
+     private Runnable handleApiDenylistExemptions(ZygoteServer zygoteServer, String[] exemptions) {
+-        return stateChangeWithUsapPoolReset(zygoteServer,
+-                () -> ZygoteInit.setApiDenylistExemptions(exemptions));
++        return stateChangeWithUsapPoolReset(
++                zygoteServer, () -> ZygoteInit.setApiDenylistExemptions(exemptions));
+     }
+ 
+     private Runnable handleUsapPoolStatusChange(ZygoteServer zygoteServer, boolean newStatus) {
+@@ -449,8 +445,8 @@ class ZygoteConnection {
+      * @return A Runnable object representing a new app in any blastulas spawned from here; the
+      *         zygote process will always receive a null value from this function.
+      */
+-    private Runnable handleHiddenApiAccessLogSampleRate(ZygoteServer zygoteServer,
+-            int samplingRate, int statsdSamplingRate) {
++    private Runnable handleHiddenApiAccessLogSampleRate(
++            ZygoteServer zygoteServer, int samplingRate, int statsdSamplingRate) {
+         return stateChangeWithUsapPoolReset(zygoteServer, () -> {
+             int maxSamplingRate = Math.max(samplingRate, statsdSamplingRate);
+             ZygoteInit.setHiddenApiAccessLogSampleRate(maxSamplingRate);
+@@ -460,26 +456,18 @@ class ZygoteConnection {
+         });
+     }
+ 
+-    protected void preload() {
+-        ZygoteInit.lazyPreload();
+-    }
++    protected void preload() { ZygoteInit.lazyPreload(); }
+ 
+-    protected boolean isPreloadComplete() {
+-        return ZygoteInit.isPreloadComplete();
+-    }
++    protected boolean isPreloadComplete() { return ZygoteInit.isPreloadComplete(); }
+ 
+-    protected DataOutputStream getSocketOutputStream() {
+-        return mSocketOutStream;
+-    }
++    protected DataOutputStream getSocketOutputStream() { return mSocketOutStream; }
+ 
+-    protected void handlePreloadPackage(String packagePath, String libsPath, String libFileName,
+-            String cacheKey) {
++    protected void handlePreloadPackage(
++            String packagePath, String libsPath, String libFileName, String cacheKey) {
+         throw new RuntimeException("Zygote does not support package preloading");
+     }
+ 
+-    protected boolean canPreloadApp() {
+-        return false;
+-    }
++    protected boolean canPreloadApp() { return false; }
+ 
+     protected void handlePreloadApp(ApplicationInfo aInfo) {
+         throw new RuntimeException("Zygote does not support app preloading");
+@@ -493,14 +481,14 @@ class ZygoteConnection {
+         try {
+             mSocket.close();
+         } catch (IOException ex) {
+-            Log.e(TAG, "Exception while closing command "
+-                    + "socket in parent", ex);
++            Log.e(TAG,
++                    "Exception while closing command "
++                            + "socket in parent",
++                    ex);
+         }
+     }
+ 
+-    boolean isClosedByPeer() {
+-        return isEof;
+-    }
++    boolean isClosedByPeer() { return isEof; }
+ 
+     /**
+      * Handles post-fork setup of child proc, closing sockets as appropriate,
+@@ -511,8 +499,8 @@ class ZygoteConnection {
+      * @param pipeFd null-ok; pipe for communication back to Zygote.
+      * @param isZygote whether this new child process is itself a new Zygote.
+      */
+-    private Runnable handleChildProc(ZygoteArguments parsedArgs,
+-            FileDescriptor pipeFd, boolean isZygote) {
++    private Runnable handleChildProc(
++            ZygoteArguments parsedArgs, FileDescriptor pipeFd, boolean isZygote) {
+         /*
+          * By the time we get here, the native code has closed the two actual Zygote
+          * socket connections, and substituted /dev/null in their place.  The LocalSocket
+@@ -526,21 +514,19 @@ class ZygoteConnection {
+         // End of the postFork event.
+         Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+         if (parsedArgs.mInvokeWith != null) {
+-            WrapperInit.execApplication(parsedArgs.mInvokeWith,
+-                    parsedArgs.mNiceName, parsedArgs.mTargetSdkVersion,
+-                    VMRuntime.getCurrentInstructionSet(),
+-                    pipeFd, parsedArgs.mRemainingArgs);
++            WrapperInit.execApplication(parsedArgs.mInvokeWith, parsedArgs.mNiceName,
++                    parsedArgs.mTargetSdkVersion, VMRuntime.getCurrentInstructionSet(), pipeFd,
++                    parsedArgs.mRemainingArgs);
+ 
+             // Should not get here.
+             throw new IllegalStateException("WrapperInit.execApplication unexpectedly returned");
+         } else {
+             if (!isZygote) {
+                 return ZygoteInit.zygoteInit(parsedArgs.mTargetSdkVersion,
+-                        parsedArgs.mDisabledCompatChanges,
+-                        parsedArgs.mRemainingArgs, null /* classLoader */);
++                        parsedArgs.mDisabledCompatChanges, parsedArgs.mRemainingArgs,
++                        null /* classLoader */);
+             } else {
+-                return ZygoteInit.childZygoteInit(
+-                        parsedArgs.mRemainingArgs  /* classLoader */);
++                return ZygoteInit.childZygoteInit(parsedArgs.mRemainingArgs /* classLoader */);
+             }
+         }
+     }
+@@ -563,11 +549,9 @@ class ZygoteConnection {
+             try {
+                 // Do a busy loop here. We can't guarantee that a failure (and thus an exception
+                 // bail) happens in a timely manner.
+-                final int BYTES_REQUIRED = 4;  // Bytes in an int.
++                final int BYTES_REQUIRED = 4; // Bytes in an int.
+ 
+-                StructPollfd[] fds = new StructPollfd[] {
+-                        new StructPollfd()
+-                };
++                StructPollfd[] fds = new StructPollfd[] {new StructPollfd()};
+ 
+                 byte[] data = new byte[BYTES_REQUIRED];
+ 
+@@ -583,10 +567,8 @@ class ZygoteConnection {
+ 
+                     int res = android.system.Os.poll(fds, remainingSleepTime);
+                     long endTime = System.nanoTime();
+-                    int elapsedTimeMs =
+-                            (int) TimeUnit.MILLISECONDS.convert(
+-                                    endTime - startTime,
+-                                    TimeUnit.NANOSECONDS);
++                    int elapsedTimeMs = (int) TimeUnit.MILLISECONDS.convert(
++                            endTime - startTime, TimeUnit.NANOSECONDS);
+                     remainingSleepTime = WRAPPED_PID_TIMEOUT_MILLIS - elapsedTimeMs;
+ 
+                     if (res > 0) {
+@@ -630,9 +612,10 @@ class ZygoteConnection {
+                     pid = innerPid;
+                     usingWrapper = true;
+                 } else {
+-                    Log.w(TAG, "Wrapped process reported a pid that is not a child of "
+-                            + "the process that we forked: childPid=" + pid
+-                            + " innerPid=" + innerPid);
++                    Log.w(TAG,
++                            "Wrapped process reported a pid that is not a child of "
++                                    + "the process that we forked: childPid=" + pid
++                                    + " innerPid=" + innerPid);
+                 }
+             }
+         }
+@@ -654,8 +637,9 @@ class ZygoteConnection {
+             // the peer is not in our session
+             // TODO get rid of this log message in the case where
+             // getsid(0) != getsid(peer.getPid())
+-            Log.i(TAG, "Zygote: setpgid failed. This is "
+-                + "normal if peer is not in our session");
++            Log.i(TAG,
++                    "Zygote: setpgid failed. This is "
++                            + "normal if peer is not in our session");
+         }
+     }
+ }
+diff --git a/core/java/com/android/internal/os/ZygoteInit.java b/core/java/com/android/internal/os/ZygoteInit.java
+index 0f26f57e2155..73434634e473 100644
+--- a/core/java/com/android/internal/os/ZygoteInit.java
++++ b/core/java/com/android/internal/os/ZygoteInit.java
+@@ -18,7 +18,6 @@ package com.android.internal.os;
+ 
+ import static android.system.OsConstants.S_IRWXG;
+ import static android.system.OsConstants.S_IRWXO;
+-
+ import static com.android.internal.util.FrameworkStatsLog.BOOT_TIME_EVENT_ELAPSED_TIME__EVENT__SECONDARY_ZYGOTE_INIT_START;
+ import static com.android.internal.util.FrameworkStatsLog.BOOT_TIME_EVENT_ELAPSED_TIME__EVENT__ZYGOTE_INIT_START;
+ 
+@@ -54,16 +53,11 @@ import android.util.Slog;
+ import android.util.TimingsTraceLog;
+ import android.webkit.WebViewFactory;
+ import android.widget.TextView;
+-
+ import com.android.internal.util.FrameworkStatsLog;
+ import com.android.internal.util.Preconditions;
+-
+ import dalvik.system.DexFile;
+ import dalvik.system.VMRuntime;
+ import dalvik.system.ZygoteHooks;
+-
+-import libcore.io.IoUtils;
+-
+ import java.io.BufferedReader;
+ import java.io.EOFException;
+ import java.io.File;
+@@ -74,6 +68,7 @@ import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.security.Provider;
+ import java.security.Security;
++import libcore.io.IoUtils;
+ 
+ /**
+  * Startup class for the zygote process.
+@@ -86,7 +81,6 @@ import java.security.Security;
+  * @hide
+  */
+ public class ZygoteInit {
+-
+     private static final String TAG = "Zygote";
+ 
+     private static final boolean LOGGING_DEBUG = Log.isLoggable(TAG, Log.DEBUG);
+@@ -106,8 +100,7 @@ public class ZygoteInit {
+     /**
+      * Used to pre-load resources.
+      */
+-    @UnsupportedAppUsage
+-    private static Resources mResources;
++    @UnsupportedAppUsage private static Resources mResources;
+ 
+     /**
+      * The path of a file that contains classes to preload.
+@@ -225,18 +218,18 @@ public class ZygoteInit {
+                 Trace.TRACE_TAG_DALVIK, "Starting installation of AndroidKeyStoreProvider");
+ 
+         AndroidKeyStoreProvider.install();
+-        Log.i(TAG, "Installed AndroidKeyStoreProvider in "
+-                + (SystemClock.uptimeMillis() - startTime) + "ms.");
++        Log.i(TAG,
++                "Installed AndroidKeyStoreProvider in " + (SystemClock.uptimeMillis() - startTime)
++                        + "ms.");
+         Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+ 
+         startTime = SystemClock.uptimeMillis();
+-        Trace.traceBegin(
+-                Trace.TRACE_TAG_DALVIK, "Starting warm up of JCA providers");
++        Trace.traceBegin(Trace.TRACE_TAG_DALVIK, "Starting warm up of JCA providers");
+         for (Provider p : Security.getProviders()) {
+             p.warmUpServiceProvision();
+         }
+-        Log.i(TAG, "Warmed up JCA providers in "
+-                + (SystemClock.uptimeMillis() - startTime) + "ms.");
++        Log.i(TAG,
++                "Warmed up JCA providers in " + (SystemClock.uptimeMillis() - startTime) + "ms.");
+         Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+     }
+ 
+@@ -315,9 +308,9 @@ public class ZygoteInit {
+                 } catch (Throwable t) {
+                     Log.e(TAG, "Error preloading " + line + ".", t);
+                     if (t instanceof Error) {
+-                        throw (Error) t;
++                        throw(Error) t;
+                     } else if (t instanceof RuntimeException) {
+-                        throw (RuntimeException) t;
++                        throw(RuntimeException) t;
+                     } else {
+                         throw new RuntimeException(t);
+                     }
+@@ -325,8 +318,9 @@ public class ZygoteInit {
+                 Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+             }
+ 
+-            Log.i(TAG, "...preloaded " + count + " classes in "
+-                    + (SystemClock.uptimeMillis() - startTime) + "ms.");
++            Log.i(TAG,
++                    "...preloaded " + count + " classes in "
++                            + (SystemClock.uptimeMillis() - startTime) + "ms.");
+             if (LOGGING_DEBUG && missingLambdaCount != 0) {
+                 Log.i(TAG, "Unresolved lambda preloads: " + missingLambdaCount);
+             }
+@@ -376,29 +370,29 @@ public class ZygoteInit {
+         // These libraries used to be part of the bootclasspath, but had to be removed.
+         // Old system applications still get them for backwards compatibility reasons,
+         // so they are cached here in order to preserve performance characteristics.
+-        SharedLibraryInfo hidlBase = new SharedLibraryInfo(
+-                "/system/framework/android.hidl.base-V1.0-java.jar", null /*packageName*/,
+-                null /*codePaths*/, null /*name*/, 0 /*version*/, SharedLibraryInfo.TYPE_BUILTIN,
+-                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/,
+-                false /*isNative*/);
+-        SharedLibraryInfo hidlManager = new SharedLibraryInfo(
+-                "/system/framework/android.hidl.manager-V1.0-java.jar", null /*packageName*/,
+-                null /*codePaths*/, null /*name*/, 0 /*version*/, SharedLibraryInfo.TYPE_BUILTIN,
+-                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/,
+-                false /*isNative*/);
+-
+-        SharedLibraryInfo androidTestBase = new SharedLibraryInfo(
+-                "/system/framework/android.test.base.jar", null /*packageName*/,
+-                null /*codePaths*/, null /*name*/, 0 /*version*/, SharedLibraryInfo.TYPE_BUILTIN,
+-                null /*declaringPackage*/, null /*dependentPackages*/, null /*dependencies*/,
+-                false /*isNative*/);
++        SharedLibraryInfo hidlBase =
++                new SharedLibraryInfo("/system/framework/android.hidl.base-V1.0-java.jar",
++                        null /*packageName*/, null /*codePaths*/, null /*name*/, 0 /*version*/,
++                        SharedLibraryInfo.TYPE_BUILTIN, null /*declaringPackage*/,
++                        null /*dependentPackages*/, null /*dependencies*/, false /*isNative*/);
++        SharedLibraryInfo hidlManager =
++                new SharedLibraryInfo("/system/framework/android.hidl.manager-V1.0-java.jar",
++                        null /*packageName*/, null /*codePaths*/, null /*name*/, 0 /*version*/,
++                        SharedLibraryInfo.TYPE_BUILTIN, null /*declaringPackage*/,
++                        null /*dependentPackages*/, null /*dependencies*/, false /*isNative*/);
++
++        SharedLibraryInfo androidTestBase =
++                new SharedLibraryInfo("/system/framework/android.test.base.jar",
++                        null /*packageName*/, null /*codePaths*/, null /*name*/, 0 /*version*/,
++                        SharedLibraryInfo.TYPE_BUILTIN, null /*declaringPackage*/,
++                        null /*dependentPackages*/, null /*dependencies*/, false /*isNative*/);
+ 
+         ApplicationLoaders.getDefault().createAndCacheNonBootclasspathSystemClassLoaders(
+-                new SharedLibraryInfo[]{
+-                    // ordered dependencies first
+-                    hidlBase,
+-                    hidlManager,
+-                    androidTestBase,
++                new SharedLibraryInfo[] {
++                        // ordered dependencies first
++                        hidlBase,
++                        hidlManager,
++                        androidTestBase,
+                 });
+     }
+ 
+@@ -420,26 +414,29 @@ public class ZygoteInit {
+                         com.android.internal.R.array.preloaded_drawables);
+                 int N = preloadDrawables(ar);
+                 ar.recycle();
+-                Log.i(TAG, "...preloaded " + N + " resources in "
+-                        + (SystemClock.uptimeMillis() - startTime) + "ms.");
++                Log.i(TAG,
++                        "...preloaded " + N + " resources in "
++                                + (SystemClock.uptimeMillis() - startTime) + "ms.");
+ 
+                 startTime = SystemClock.uptimeMillis();
+                 ar = mResources.obtainTypedArray(
+                         com.android.internal.R.array.preloaded_color_state_lists);
+                 N = preloadColorStateLists(ar);
+                 ar.recycle();
+-                Log.i(TAG, "...preloaded " + N + " resources in "
+-                        + (SystemClock.uptimeMillis() - startTime) + "ms.");
++                Log.i(TAG,
++                        "...preloaded " + N + " resources in "
++                                + (SystemClock.uptimeMillis() - startTime) + "ms.");
+ 
+                 if (mResources.getBoolean(
+-                        com.android.internal.R.bool.config_freeformWindowManagement)) {
++                            com.android.internal.R.bool.config_freeformWindowManagement)) {
+                     startTime = SystemClock.uptimeMillis();
+                     ar = mResources.obtainTypedArray(
+                             com.android.internal.R.array.preloaded_freeform_multi_window_drawables);
+                     N = preloadDrawables(ar);
+                     ar.recycle();
+-                    Log.i(TAG, "...preloaded " + N + " resource in "
+-                            + (SystemClock.uptimeMillis() - startTime) + "ms.");
++                    Log.i(TAG,
++                            "...preloaded " + N + " resource in "
++                                    + (SystemClock.uptimeMillis() - startTime) + "ms.");
+                 }
+             }
+             mResources.finishPreloading();
+@@ -455,17 +452,14 @@ public class ZygoteInit {
+ 
+             if (id != 0) {
+                 if (mResources.getColorStateList(id, null) == null) {
+-                    throw new IllegalArgumentException(
+-                            "Unable to find preloaded color resource #0x"
+-                                    + Integer.toHexString(id)
+-                                    + " (" + ar.getString(i) + ")");
++                    throw new IllegalArgumentException("Unable to find preloaded color resource #0x"
++                            + Integer.toHexString(id) + " (" + ar.getString(i) + ")");
+                 }
+             }
+         }
+         return N;
+     }
+ 
+-
+     private static int preloadDrawables(TypedArray ar) {
+         int N = ar.length();
+         for (int i = 0; i < N; i++) {
+@@ -475,8 +469,7 @@ public class ZygoteInit {
+                 if (mResources.getDrawable(id, null) == null) {
+                     throw new IllegalArgumentException(
+                             "Unable to find preloaded drawable resource #0x"
+-                                    + Integer.toHexString(id)
+-                                    + " (" + ar.getString(i) + ")");
++                            + Integer.toHexString(id) + " (" + ar.getString(i) + ")");
+                 }
+             }
+         }
+@@ -487,17 +480,14 @@ public class ZygoteInit {
+      * Runs several special GCs to try to clean up a few generations of softly- and final-reachable
+      * objects, along with any other garbage. This is only useful just before a fork().
+      */
+-    private static void gcAndFinalize() {
+-        ZygoteHooks.gcAndFinalize();
+-    }
++    private static void gcAndFinalize() { ZygoteHooks.gcAndFinalize(); }
+ 
+     private static boolean shouldProfileSystemServer() {
+         boolean defaultValue = SystemProperties.getBoolean("dalvik.vm.profilesystemserver",
+-                /*default=*/ false);
++                /*default=*/false);
+         // Can't use DeviceConfig since it's not initialized at this point.
+-        return SystemProperties.getBoolean(
+-                "persist.device_config." + DeviceConfig.NAMESPACE_RUNTIME_NATIVE_BOOT
+-                        + ".profilesystemserver",
++        return SystemProperties.getBoolean("persist.device_config."
++                        + DeviceConfig.NAMESPACE_RUNTIME_NATIVE_BOOT + ".profilesystemserver",
+                 defaultValue);
+     }
+ 
+@@ -540,9 +530,8 @@ public class ZygoteInit {
+                 args = amendedArgs;
+             }
+ 
+-            WrapperInit.execApplication(parsedArgs.mInvokeWith,
+-                    parsedArgs.mNiceName, parsedArgs.mTargetSdkVersion,
+-                    VMRuntime.getCurrentInstructionSet(), null, args);
++            WrapperInit.execApplication(parsedArgs.mInvokeWith, parsedArgs.mNiceName,
++                    parsedArgs.mTargetSdkVersion, VMRuntime.getCurrentInstructionSet(), null, args);
+ 
+             throw new IllegalStateException("Unexpected return from WrapperInit.execApplication");
+         } else {
+@@ -555,8 +544,7 @@ public class ZygoteInit {
+              * Pass the remaining arguments to SystemServer.
+              */
+             return ZygoteInit.zygoteInit(parsedArgs.mTargetSdkVersion,
+-                    parsedArgs.mDisabledCompatChanges,
+-                    parsedArgs.mRemainingArgs, cl);
++                    parsedArgs.mDisabledCompatChanges, parsedArgs.mRemainingArgs, cl);
+         }
+ 
+         /* should never reach here */
+@@ -572,8 +560,8 @@ public class ZygoteInit {
+         if (sCachedSystemServerClassLoader == null) {
+             final String systemServerClasspath = Os.getenv("SYSTEMSERVERCLASSPATH");
+             if (systemServerClasspath != null) {
+-                sCachedSystemServerClassLoader = createPathClassLoader(systemServerClasspath,
+-                        VMRuntime.SDK_VERSION_CUR_DEVELOPMENT);
++                sCachedSystemServerClassLoader = createPathClassLoader(
++                        systemServerClasspath, VMRuntime.SDK_VERSION_CUR_DEVELOPMENT);
+             }
+         }
+         return sCachedSystemServerClassLoader;
+@@ -591,17 +579,13 @@ public class ZygoteInit {
+         }
+         String[] codePaths = systemServerClasspath.split(":");
+ 
+-        final IInstalld installd = IInstalld.Stub
+-                .asInterface(ServiceManager.getService("installd"));
++        final IInstalld installd =
++                IInstalld.Stub.asInterface(ServiceManager.getService("installd"));
+ 
+         String systemServerPackageName = "android";
+         String systemServerProfileName = "primary.prof";
+-        installd.prepareAppProfile(
+-                systemServerPackageName,
+-                UserHandle.USER_SYSTEM,
+-                UserHandle.getAppId(Process.SYSTEM_UID),
+-                systemServerProfileName,
+-                codePaths[0],
++        installd.prepareAppProfile(systemServerPackageName, UserHandle.USER_SYSTEM,
++                UserHandle.getAppId(Process.SYSTEM_UID), systemServerProfileName, codePaths[0],
+                 /*dexMetadata*/ null);
+ 
+         File curProfileDir = Environment.getDataProfilesDePackageDirectory(
+@@ -610,12 +594,8 @@ public class ZygoteInit {
+         File refProfileDir = Environment.getDataProfilesDePackageDirectory(
+                 UserHandle.USER_SYSTEM, systemServerPackageName);
+         String refProfilePath = new File(refProfileDir, systemServerProfileName).getAbsolutePath();
+-        VMRuntime.registerAppInfo(
+-                systemServerPackageName,
+-                curProfilePath,
+-                refProfilePath,
+-                codePaths,
+-                VMRuntime.CODE_PATH_TYPE_PRIMARY_APK);
++        VMRuntime.registerAppInfo(systemServerPackageName, curProfilePath, refProfilePath,
++                codePaths, VMRuntime.CODE_PATH_TYPE_PRIMARY_APK);
+     }
+ 
+     /**
+@@ -651,8 +631,8 @@ public class ZygoteInit {
+         // We use the boot class loader, that's what the runtime expects at AOT.
+         ClassLoader parent = ClassLoader.getSystemClassLoader().getParent();
+ 
+-        return ClassLoaderFactory.createClassLoader(classPath, libraryPath, libraryPath,
+-                parent, targetSdkVersion, true /* isNamespaceShared */, null /* classLoaderName */);
++        return ClassLoaderFactory.createClassLoader(classPath, libraryPath, libraryPath, parent,
++                targetSdkVersion, true /* isNamespaceShared */, null /* classLoaderName */);
+     }
+ 
+     /**
+@@ -667,16 +647,15 @@ public class ZygoteInit {
+         for (String classPathElement : classPathElements) {
+             // We default to the verify filter because the compilation will happen on /data and
+             // system server cannot load executable code outside /system.
+-            String systemServerFilter = SystemProperties.get(
+-                    "dalvik.vm.systemservercompilerfilter", "verify");
++            String systemServerFilter =
++                    SystemProperties.get("dalvik.vm.systemservercompilerfilter", "verify");
+ 
+-            String classLoaderContext =
+-                        getSystemServerClassLoaderContext(classPathForElement);
++            String classLoaderContext = getSystemServerClassLoaderContext(classPathForElement);
+             int dexoptNeeded;
+             try {
+-                dexoptNeeded = DexFile.getDexOptNeeded(
+-                        classPathElement, instructionSet, systemServerFilter,
+-                        classLoaderContext, false /* newProfile */, false /* downgrade */);
++                dexoptNeeded = DexFile.getDexOptNeeded(classPathElement, instructionSet,
++                        systemServerFilter, classLoaderContext, false /* newProfile */,
++                        false /* downgrade */);
+             } catch (FileNotFoundException ignored) {
+                 // Do not add to the classpath.
+                 Log.w(TAG, "Missing classpath element for system server: " + classPathElement);
+@@ -685,8 +664,9 @@ public class ZygoteInit {
+                 // Not fully clear what to do here as we don't know the cause of the
+                 // IO exception. Add to the classpath to be conservative, but don't
+                 // attempt to compile it.
+-                Log.w(TAG, "Error checking classpath element for system server: "
+-                        + classPathElement, e);
++                Log.w(TAG,
++                        "Error checking classpath element for system server: " + classPathElement,
++                        e);
+                 dexoptNeeded = DexFile.NO_DEXOPT_NEEDED;
+             }
+ 
+@@ -696,10 +676,10 @@ public class ZygoteInit {
+                 final int dexFlags = 0;
+                 final String uuid = StorageManager.UUID_PRIVATE_INTERNAL;
+                 final String seInfo = null;
+-                final int targetSdkVersion = 0;  // SystemServer targets the system's SDK version
++                final int targetSdkVersion = 0; // SystemServer targets the system's SDK version
+                 // Wait for installd to be made available
+-                IInstalld installd = IInstalld.Stub.asInterface(
+-                        ServiceManager.waitForService("installd"));
++                IInstalld installd =
++                        IInstalld.Stub.asInterface(ServiceManager.waitForService("installd"));
+ 
+                 try {
+                     installd.dexopt(classPathElement, Process.SYSTEM_UID, packageName,
+@@ -709,13 +689,15 @@ public class ZygoteInit {
+                             "server-dexopt");
+                 } catch (RemoteException | ServiceSpecificException e) {
+                     // Ignore (but log), we need this on the classpath for fallback mode.
+-                    Log.w(TAG, "Failed compiling classpath element for system server: "
+-                            + classPathElement, e);
++                    Log.w(TAG,
++                            "Failed compiling classpath element for system server: "
++                                    + classPathElement,
++                            e);
+                 }
+             }
+ 
+-            classPathForElement = encodeSystemServerClassPath(
+-                    classPathForElement, classPathElement);
++            classPathForElement =
++                    encodeSystemServerClassPath(classPathForElement, classPathElement);
+         }
+     }
+ 
+@@ -739,9 +721,8 @@ public class ZygoteInit {
+      * classPath}.
+      */
+     private static String encodeSystemServerClassPath(String classPath, String newElement) {
+-        return (classPath == null || classPath.isEmpty())
+-                ? newElement
+-                : classPath + ":" + newElement;
++        return (classPath == null || classPath.isEmpty()) ? newElement
++                                                          : classPath + ":" + newElement;
+     }
+ 
+     /**
+@@ -750,26 +731,17 @@ public class ZygoteInit {
+      * @return A {@code Runnable} that provides an entrypoint into system_server code in the child
+      * process; {@code null} in the parent.
+      */
+-    private static Runnable forkSystemServer(String abiList, String socketName,
+-            ZygoteServer zygoteServer) {
+-        long capabilities = posixCapabilitiesAsBits(
+-                OsConstants.CAP_IPC_LOCK,
+-                OsConstants.CAP_KILL,
+-                OsConstants.CAP_NET_ADMIN,
+-                OsConstants.CAP_NET_BIND_SERVICE,
+-                OsConstants.CAP_NET_BROADCAST,
+-                OsConstants.CAP_NET_RAW,
+-                OsConstants.CAP_SYS_MODULE,
+-                OsConstants.CAP_SYS_NICE,
+-                OsConstants.CAP_SYS_PTRACE,
+-                OsConstants.CAP_SYS_TIME,
+-                OsConstants.CAP_SYS_TTY_CONFIG,
+-                OsConstants.CAP_WAKE_ALARM,
+-                OsConstants.CAP_BLOCK_SUSPEND
+-        );
++    private static Runnable forkSystemServer(
++            String abiList, String socketName, ZygoteServer zygoteServer) {
++        long capabilities = posixCapabilitiesAsBits(OsConstants.CAP_IPC_LOCK, OsConstants.CAP_KILL,
++                OsConstants.CAP_NET_ADMIN, OsConstants.CAP_NET_BIND_SERVICE,
++                OsConstants.CAP_NET_BROADCAST, OsConstants.CAP_NET_RAW, OsConstants.CAP_SYS_MODULE,
++                OsConstants.CAP_SYS_NICE, OsConstants.CAP_SYS_PTRACE, OsConstants.CAP_SYS_TIME,
++                OsConstants.CAP_SYS_TTY_CONFIG, OsConstants.CAP_WAKE_ALARM,
++                OsConstants.CAP_BLOCK_SUSPEND);
+         /* Containers run without some capabilities, so drop any caps that are not available. */
+-        StructCapUserHeader header = new StructCapUserHeader(
+-                OsConstants._LINUX_CAPABILITY_VERSION_3, 0);
++        StructCapUserHeader header =
++                new StructCapUserHeader(OsConstants._LINUX_CAPABILITY_VERSION_3, 0);
+         StructCapUserData[] data;
+         try {
+             data = Os.capget(header);
+@@ -834,12 +806,8 @@ public class ZygoteInit {
+             }
+ 
+             /* Request to fork the system server process */
+-            pid = Zygote.forkSystemServer(
+-                    parsedArgs.mUid, parsedArgs.mGid,
+-                    parsedArgs.mGids,
+-                    parsedArgs.mRuntimeFlags,
+-                    null,
+-                    parsedArgs.mPermittedCapabilities,
++            pid = Zygote.forkSystemServer(parsedArgs.mUid, parsedArgs.mGid, parsedArgs.mGids,
++                    parsedArgs.mRuntimeFlags, null, parsedArgs.mPermittedCapabilities,
+                     parsedArgs.mEffectiveCapabilities);
+         } catch (IllegalArgumentException ex) {
+             throw new RuntimeException(ex);
+@@ -903,12 +871,12 @@ public class ZygoteInit {
+         try {
+             // Store now for StatsLogging later.
+             final long startTime = SystemClock.elapsedRealtime();
+-            final boolean isRuntimeRestarted = "1".equals(
+-                    SystemProperties.get("sys.boot_completed"));
++            final boolean isRuntimeRestarted =
++                    "1".equals(SystemProperties.get("sys.boot_completed"));
+ 
+             String bootTimeTag = Process.is64Bit() ? "Zygote64Timing" : "Zygote32Timing";
+-            TimingsTraceLog bootTimingsTraceLog = new TimingsTraceLog(bootTimeTag,
+-                    Trace.TRACE_TAG_DALVIK);
++            TimingsTraceLog bootTimingsTraceLog =
++                    new TimingsTraceLog(bootTimeTag, Trace.TRACE_TAG_DALVIK);
+             bootTimingsTraceLog.traceBegin("ZygoteInit");
+             RuntimeInit.preForkInit();
+ 
+@@ -934,8 +902,7 @@ public class ZygoteInit {
+             if (!isRuntimeRestarted) {
+                 if (isPrimaryZygote) {
+                     FrameworkStatsLog.write(FrameworkStatsLog.BOOT_TIME_EVENT_ELAPSED_TIME_REPORTED,
+-                            BOOT_TIME_EVENT_ELAPSED_TIME__EVENT__ZYGOTE_INIT_START,
+-                            startTime);
++                            BOOT_TIME_EVENT_ELAPSED_TIME__EVENT__ZYGOTE_INIT_START, startTime);
+                 } else if (zygoteSocketName.equals(Zygote.SECONDARY_SOCKET_NAME)) {
+                     FrameworkStatsLog.write(FrameworkStatsLog.BOOT_TIME_EVENT_ELAPSED_TIME_REPORTED,
+                             BOOT_TIME_EVENT_ELAPSED_TIME__EVENT__SECONDARY_ZYGOTE_INIT_START,
+@@ -951,11 +918,9 @@ public class ZygoteInit {
+             // In such cases, we will preload things prior to our first fork.
+             if (!enableLazyPreload) {
+                 bootTimingsTraceLog.traceBegin("ZygotePreload");
+-                EventLog.writeEvent(LOG_BOOT_PROGRESS_PRELOAD_START,
+-                        SystemClock.uptimeMillis());
++                EventLog.writeEvent(LOG_BOOT_PROGRESS_PRELOAD_START, SystemClock.uptimeMillis());
+                 preload(bootTimingsTraceLog);
+-                EventLog.writeEvent(LOG_BOOT_PROGRESS_PRELOAD_END,
+-                        SystemClock.uptimeMillis());
++                EventLog.writeEvent(LOG_BOOT_PROGRESS_PRELOAD_END, SystemClock.uptimeMillis());
+                 bootTimingsTraceLog.traceEnd(); // ZygotePreload
+             }
+ 
+@@ -966,12 +931,13 @@ public class ZygoteInit {
+ 
+             bootTimingsTraceLog.traceEnd(); // ZygoteInit
+ 
+-            Zygote.initNativeState(isPrimaryZygote);
++            Zygote.initNativeState(isPrimaryZygote); //初始化本机状态
+ 
+             ZygoteHooks.stopZygoteNoThreadCreation();
+ 
+-            zygoteServer = new ZygoteServer(isPrimaryZygote);
++            zygoteServer = new ZygoteServer(isPrimaryZygote); //创建ZygoteServer对象
+ 
++            //系统服务会在开机的时候被创建，决定是否创建的条件是在zygote类的main函数被执行的时候，runtime.start()参数(args)
+             if (startSystemServer) {
+                 Runnable r = forkSystemServer(abiList, zygoteSocketName, zygoteServer);
+ 
+@@ -987,7 +953,9 @@ public class ZygoteInit {
+ 
+             // The select loop returns early in the child process after a fork and
+             // loops forever in the zygote.
+-            caller = zygoteServer.runSelectLoop(abiList);
++            //在zygoteServer
++            //服务中永久循环监听socket服务，作用是等待应用程序启动链接，并为他创建进程pid和启动入口
++            caller = zygoteServer.runSelectLoop(abiList); //返回的是Runnable类型的
+         } catch (Throwable ex) {
+             Log.e(TAG, "System zygote died with fatal exception", ex);
+             throw ex;
+@@ -999,8 +967,9 @@ public class ZygoteInit {
+ 
+         // We're in the child process and have exited the select loop. Proceed to execute the
+         // command.
++        //反射调用，最终调用了ActivityThread类的main方法
+         if (caller != null) {
+-            caller.run();
++            caller.run(); //走的是RunnableInit.java中的run方法
+         }
+     }
+ 
+@@ -1016,19 +985,17 @@ public class ZygoteInit {
+ 
+     private static void waitForSecondaryZygote(String socketName) {
+         String otherZygoteName = Zygote.PRIMARY_SOCKET_NAME.equals(socketName)
+-                ? Zygote.SECONDARY_SOCKET_NAME : Zygote.PRIMARY_SOCKET_NAME;
++                ? Zygote.SECONDARY_SOCKET_NAME
++                : Zygote.PRIMARY_SOCKET_NAME;
+         ZygoteProcess.waitForConnectionToZygote(otherZygoteName);
+     }
+ 
+-    static boolean isPreloadComplete() {
+-        return sPreloadComplete;
+-    }
++    static boolean isPreloadComplete() { return sPreloadComplete; }
+ 
+     /**
+      * Class not instantiable.
+      */
+-    private ZygoteInit() {
+-    }
++    private ZygoteInit() {}
+ 
+     /**
+      * The main function called when started through the zygote process. This could be unified with
+@@ -1053,10 +1020,12 @@ public class ZygoteInit {
+         Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "ZygoteInit");
+         RuntimeInit.redirectLogStreams();
+ 
+-        RuntimeInit.commonInit();
+-        ZygoteInit.nativeZygoteInit();
+-        return RuntimeInit.applicationInit(targetSdkVersion, disabledCompatChanges, argv,
+-                classLoader);
++        RuntimeInit.commonInit(); //通用的初始化
++        ZygoteInit
++                .nativeZygoteInit(); // zygote的初始化 AndroidRuntime.cpp中定义的 启动新的binder线程
++        //应用初始化
++        return RuntimeInit.applicationInit(
++                targetSdkVersion, disabledCompatChanges, argv, classLoader);
+     }
+ 
+     /**
+@@ -1066,7 +1035,7 @@ public class ZygoteInit {
+      */
+     static Runnable childZygoteInit(String[] argv) {
+         RuntimeInit.Arguments args = new RuntimeInit.Arguments(argv);
+-        return RuntimeInit.findStaticMain(args.startClass, args.startArgs, /* classLoader= */null);
++        return RuntimeInit.findStaticMain(args.startClass, args.startArgs, /* classLoader= */ null);
+     }
+ 
+     private static native void nativeZygoteInit();
+diff --git a/core/java/com/android/internal/os/ZygoteServer.java b/core/java/com/android/internal/os/ZygoteServer.java
+index 4d2266b2eba5..c21e8d820092 100644
+--- a/core/java/com/android/internal/os/ZygoteServer.java
++++ b/core/java/com/android/internal/os/ZygoteServer.java
+@@ -543,11 +543,12 @@ class ZygoteServer {
+                         socketFDs.add(newPeer.getFileDescriptor());
+                     } else if (pollIndex < usapPoolEventFDIndex) {
+                         // Session socket accepted from the Zygote server socket
+-
++                        //接收套字节链接
+                         try {
+                             ZygoteConnection connection = peers.get(pollIndex);
+                             boolean multipleForksOK = !isUsapPoolEnabled()
+                                     && ZygoteHooks.isIndefiniteThreadSuspensionSafe();
++                          //根据socket信息新建子进程的功能 command最终被返回
+                             final Runnable command =
+                                     connection.processCommand(this, multipleForksOK);
+ 
