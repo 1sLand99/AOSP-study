@@ -5,6 +5,7 @@ declare -A patches=(
     ["aosp_art.patch"]="art"
     ["aosp_framework_base.patch"]="frameworks/base"
     ["aosp_libcore.patch"]="libcore"
+    ["aosp_packages_modules_NetworkStack.patch"]="packages/modules/NetworkStack"
 )
 
 # 遍历每个 patch 文件并应用

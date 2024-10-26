@@ -1,0 +1,43 @@
+diff --git a/res/values/config.xml b/res/values/config.xml
+index 805ca041..93a460cd 100644
+--- a/res/values/config.xml
++++ b/res/values/config.xml
+@@ -13,7 +13,7 @@
+          config_captive_portal_http_url and *NOT* by changing or overlaying
+          this resource. It will break if the enforcement of overlayable starts.
+          -->
+-    <string name="default_captive_portal_http_url" translatable="false">http://connectivitycheck.gstatic.com/generate_204</string>
++    <string name="default_captive_portal_http_url" translatable="false">http://connect.rom.miui.com/generate_204</string>
+     <!-- HTTPS URL for network validation, to use for confirming internet connectivity. -->
+     <!-- default_captive_portal_https_url is not configured as overlayable so
+          OEMs that wish to change captive_portal_https_url configuration must
+@@ -21,7 +21,7 @@
+          config_captive_portal_https_url and *NOT* by changing or overlaying
+          this resource. It will break if the enforcement of overlayable starts.
+          -->
+-    <string name="default_captive_portal_https_url" translatable="false">https://www.google.com/generate_204</string>
++    <string name="default_captive_portal_https_url" translatable="false">https://connect.rom.miui.com/generate_204</string>
+ 
+     <!-- List of fallback URLs to use for detecting captive portals. -->
+     <!-- default_captive_portal_fallback_urls is not configured as overlayable
+diff --git a/src/android/net/util/NetworkStackUtils.java b/src/android/net/util/NetworkStackUtils.java
+index 81d0c08b..144d1854 100755
+--- a/src/android/net/util/NetworkStackUtils.java
++++ b/src/android/net/util/NetworkStackUtils.java
+@@ -165,14 +165,14 @@ public class NetworkStackUtils {
+      * The default list of HTTP URLs to use for detecting captive portals.
+      */
+     public static final String[] DEFAULT_CAPTIVE_PORTAL_HTTP_URLS =
+-            new String [] {"http://connectivitycheck.gstatic.com/generate_204"};
++            new String [] {"http://connect.rom.miui.com/generate_204"};
+ 
+     /**
+      * The default list of HTTPS URLs for network validation, to use for confirming internet
+      * connectivity.
+      */
+     public static final String[] DEFAULT_CAPTIVE_PORTAL_HTTPS_URLS =
+-            new String [] {"https://www.google.com/generate_204"};
++            new String [] {"https://connect.rom.miui.com/generate_204"};
+ 
+     /**
+      * @deprecated Considering boolean experiment flag is likely to cause misconfiguration

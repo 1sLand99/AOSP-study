@@ -1,5 +1,5 @@
 diff --git a/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java b/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java
-index 60511a9c2d..cb27669124 100644
+index 60511a9c2d..bd7881324a 100644
 --- a/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java
 +++ b/dalvik/src/main/java/dalvik/system/BaseDexClassLoader.java
 @@ -131,6 +131,7 @@ public class BaseDexClassLoader extends ClassLoader {
@@ -10,8 +10,41 @@ index 60511a9c2d..cb27669124 100644
          this.pathList = new DexPathList(this, dexPath, librarySearchPath, null, isTrusted);
  
          // Run background verification after having set 'pathList'.
+@@ -202,6 +203,7 @@ public class BaseDexClassLoader extends ClassLoader {
+     @Override
+     protected Class<?> findClass(String name) throws ClassNotFoundException {
+         // First, check whether the class is present in our shared libraries.
++        //检查该类是否在我们的共享库中
+         if (sharedLibraryLoaders != null) {
+             for (ClassLoader loader : sharedLibraryLoaders) {
+                 try {
+@@ -213,6 +215,7 @@ public class BaseDexClassLoader extends ClassLoader {
+         // Check whether the class in question is present in the dexPath that
+         // this classloader operates on.
+         List<Throwable> suppressedExceptions = new ArrayList<Throwable>();
++        //在pathList中寻找name对应的类，pathList关键成员pathList 类型为DexPathList。该变量储存了路径信息，由DexPathList findClass来完成相关工作
+         Class c = pathList.findClass(name, suppressedExceptions);
+         if (c == null) {
+             ClassNotFoundException cnfe = new ClassNotFoundException(
+diff --git a/dalvik/src/main/java/dalvik/system/DexFile.java b/dalvik/src/main/java/dalvik/system/DexFile.java
+index f8e7f42edc..4d8e2c9e8c 100644
+--- a/dalvik/src/main/java/dalvik/system/DexFile.java
++++ b/dalvik/src/main/java/dalvik/system/DexFile.java
+@@ -291,10 +291,12 @@ public final class DexFile {
+         return defineClass(name, loader, mCookie, this, suppressed);
+     }
+ 
++    //定义类
+     private static Class defineClass(String name, ClassLoader loader, Object cookie,
+                                      DexFile dexFile, List<Throwable> suppressed) {
+         Class result = null;
+         try {
++            //进入了art native层
+             result = defineClassNative(name, loader, cookie, dexFile);
+         } catch (NoClassDefFoundError e) {
+             if (suppressed != null) {
 diff --git a/dalvik/src/main/java/dalvik/system/DexPathList.java b/dalvik/src/main/java/dalvik/system/DexPathList.java
-index acf5e6635e..44cfe2f890 100644
+index acf5e6635e..a143e21b95 100644
 --- a/dalvik/src/main/java/dalvik/system/DexPathList.java
 +++ b/dalvik/src/main/java/dalvik/system/DexPathList.java
 @@ -134,6 +134,13 @@ public final class DexPathList {
@@ -127,3 +160,63 @@ index acf5e6635e..44cfe2f890 100644
              return new DexFile(file, loader, elements);
          } else {
              String optimizedPath = optimizedPathFor(file, optimizedDirectory);
+@@ -527,8 +559,19 @@ public final class DexPathList {
+      * @return the named class or {@code null} if the class is not
+      * found in any of the dex files
+      */
++    /**
++     * 一个BaseDexClassLoader对象和一个DexPathList对象互相关联
++     * DexPathList可以加载一个或多个dex文件信息，这说明BaseDexClassLoader可以从DexPathList指定的dex文件中去搜索加载目标的类
++     */
+     public Class<?> findClass(String name, List<Throwable> suppressed) {
++        //dexElements：描述definingContext ClassLoader所加载的dex文件元素数组
+         for (Element element : dexElements) {
++            //dex Elements在加载类的时候已经被初始化过了
++            /**
++             * name：类名
++             * definingContext：加载类的上下文 指向DexPathList对象
++             * suppressed：异常列表
++             */
+             Class<?> clazz = element.findClass(name, definingContext, suppressed);
+             if (clazz != null) {
+                 return clazz;
+diff --git a/ojluni/src/main/java/java/lang/ClassLoader.java b/ojluni/src/main/java/java/lang/ClassLoader.java
+index 0a8b08ad8f..ba28f55c0a 100644
+--- a/ojluni/src/main/java/java/lang/ClassLoader.java
++++ b/ojluni/src/main/java/java/lang/ClassLoader.java
+@@ -356,27 +356,30 @@ public abstract class ClassLoader {
+     // <p> Unless overridden, this method synchronizes on the result of
+     // {@link #getClassLoadingLock <tt>getClassLoadingLock</tt>} method
+     // during the entire class loading process.
++    //双亲委派模型来搜索类
++    //这个classloader是受保护的 外界不能访问
+     protected Class<?> loadClass(String name, boolean resolve)
+         throws ClassNotFoundException
+     {
+             // First, check if the class has already been loaded
++            //先查看虚拟机中是否已经加载了这个类
+             Class<?> c = findLoadedClass(name);
+-            if (c == null) {
++            if (c == null) { //如果没有加载 就先尝试加载
+                 try {
+                     if (parent != null) {
+-                        c = parent.loadClass(name, false);
++                        c = parent.loadClass(name, false); //如果还有父类 就是用父类去调用
+                     } else {
+-                        c = findBootstrapClassOrNull(name);
++                        c = findBootstrapClassOrNull(name); //如果没有父类 尝试使用BootstrapClassLoader加载
+                     }
+                 } catch (ClassNotFoundException e) {
+                     // ClassNotFoundException thrown if class not found
+                     // from the non-null parent class loader
+                 }
+ 
+-                if (c == null) {
++                if (c == null) { //如果委托者加载不成功 则尝试自己加载
+                     // If still not found, then invoke findClass in order
+                     // to find the class.
+-                    c = findClass(name);
++                    c = findClass(name); //最终调用BaseDexClassLoader.findClass ClassLoader只是抽象类，被BaseDexClassLoader继承重写
+                 }
+             }
+             return c;

@@ -114,8 +114,65 @@ index 62014aa67f..a12edf57bf 100644
        std::unique_ptr<const DexFile> next_dex_file(OpenOneDexFileFromZip(zip_archive,
                                                                           name.c_str(),
                                                                           fake_location,
+diff --git a/runtime/art_method.cc b/runtime/art_method.cc
+index 89dc93b895..3eb7c907e1 100644
+--- a/runtime/art_method.cc
++++ b/runtime/art_method.cc
+@@ -310,6 +310,15 @@ uint32_t ArtMethod::FindCatchBlock(Handle<mirror::Class> exception_type,
+   return found_dex_pc;
+ }
+ 
++/** art执行函数主入口，决定着用哪个方式执行
++ * jni 本地方法和java方法入口交汇处
++ * 不同的执行模式有不同的入口
++ * self 线程
++ * args 方法所需要的参数 他是一个数组
++ * args_size 参数个数
++ * result 储存方法调用的结果
++ * shorty 方法的简描述
++ */
+ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue* result,
+                        const char* shorty) {
+   if (UNLIKELY(__builtin_frame_address(0) < self->GetStackEnd())) {
+@@ -326,20 +335,26 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
+   // Push a transition back into managed code onto the linked list in thread.
+   ManagedStack fragment;
+   self->PushManagedStackFragment(&fragment);
+-
++  //获取art实例
+   Runtime* runtime = Runtime::Current();
+   // Call the invoke stub, passing everything as arguments.
+   // If the runtime is not yet started or it is required by the debugger, then perform the
+   // Invocation by the interpreter, explicitly forcing interpretation over JIT to prevent
+   // cycling around the various JIT/Interpreter methods that handle method invocation.
++
++  //如果art没有启动 ||  是否强制解释模式 && 不是本地方法 && 不是代理方法（jit编译） && 可调用的方法
+   if (UNLIKELY(!runtime->IsStarted() ||
+                (self->IsForceInterpreter() && !IsNative() && !IsProxyMethod() && IsInvokable()))) {
++     //解释模式
+     if (IsStatic()) {
++      //静态方法进入解释器，函数里会判断是native还是解释器执行
+       art::interpreter::EnterInterpreterFromInvoke(
+           self, this, nullptr, args, result, /*stay_in_interpreter=*/ true);
+-    } else {
++          //OAT模式
++    } else { 
+       mirror::Object* receiver =
+           reinterpret_cast<StackReference<mirror::Object>*>(&args[0])->AsMirrorPtr();
++          //非静态方法进入解释器 函数里会判断是native还是解释器执行
+       art::interpreter::EnterInterpreterFromInvoke(
+           self, this, receiver, args + 1, result, /*stay_in_interpreter=*/ true);
+     }
+@@ -347,6 +362,7 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
+     DCHECK_EQ(runtime->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
+ 
+     constexpr bool kLogInvocationStartAndReturn = false;
++    //判断方法是否存在机器码
+     bool have_quick_code = GetEntryPointFromQuickCompiledCode() != nullptr;
+     if (LIKELY(have_quick_code)) {
+       if (kLogInvocationStartAndReturn) {
 diff --git a/runtime/class_linker.cc b/runtime/class_linker.cc
-index e21a004e33..8c72169087 100644
+index e21a004e33..f4608181bd 100644
 --- a/runtime/class_linker.cc
 +++ b/runtime/class_linker.cc
 @@ -1683,6 +1683,7 @@ static std::unique_ptr<const DexFile> OpenOatDexFile(const OatFile* oat_file,
@@ -207,8 +264,642 @@ index e21a004e33..8c72169087 100644
            method.SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(),
                                                              image_pointer_size_);
          }
+@@ -3065,20 +3085,39 @@ struct ScopedDefiningClass {
+   bool returned_;
+ };
+ 
++/**
++ * DefineClass dex文件中加载某个类的入口函数
++ * 主要有AllocClass、SetupClass、InsertClass、LoadClass、LinkClass
++ * AllocClass 负责申请Class对象所需的内存空间
++ * SetupClass 是对Class对象进行初始化
++ * InsertClass 将本次加载的Class保存到一个已经加载的列表中
++ * --------------------------------------------------------------
++ * 关于类重点关注下面俩 关于方法 关注LoadClass内部实现
++ * LoadClass 是用成员变量、成员函数等来填满AllocClass申请的空间
++ * LinkerClass 建立各个Class之间的关联 如父类 子类间的重载 多态性的Vtable和Itable等
++ */
+ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
+                                                const char* descriptor,
+                                                size_t hash,
+                                                Handle<mirror::ClassLoader> class_loader,
+                                                const DexFile& dex_file,
+                                                const dex::ClassDef& dex_class_def) {
++  /**
++   * descriptor 目标类的字符串描述 需要遵循JVM的规范 例如"Ljava/lang/String;"
++   * dex_file 该类所在的dex文件对象 理解为 他就代表着一个java类
++   * dex_class_def 目标类在dex文件中对应的ClassDef信息
++   */
++            
+   ScopedDefiningClass sdc(self);
+   StackHandleScope<3> hs(self);
+   metrics::AutoTimer timer{GetMetrics()->ClassLoadingTotalTime()};
+-  auto klass = hs.NewHandle<mirror::Class>(nullptr);
++  auto klass = hs.NewHandle<mirror::Class>(nullptr); //描述加载完成的类
+ 
+   // Load the class from the dex file.
++  //从dex文件加载class
+   if (UNLIKELY(!init_done_)) {
+     // finish up init of hand crafted class_roots_
++    //这里是把常用的类并且大小可以确定的 会提前构造好对应的class 直接使用
+     if (strcmp(descriptor, "Ljava/lang/Object;") == 0) {
+       klass.Assign(GetClassRoot<mirror::Object>(this));
+     } else if (strcmp(descriptor, "Ljava/lang/Class;") == 0) {
+@@ -3097,6 +3136,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
+   // For AOT-compilation of an app, we may use a shortened boot class path that excludes
+   // some runtime modules. Prevent definition of classes in app class loader that could clash
+   // with these modules as these classes could be resolved differently during execution.
++  //对于应用程序的AOT编译，我们可以使用一个缩短的引导类路径，该路径排除了一些运行时的模块，防止在应用程序类加载器中定义可能与这些模块冲突的类，因为这些类在执行过程中可能以不同的方式解决
+   if (class_loader != nullptr &&
+       Runtime::Current()->IsAotCompiler() &&
+       IsUpdatableBootClassPathDescriptor(descriptor)) {
+@@ -3164,11 +3204,13 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
+   if (self->IsExceptionPending()) {
+     return sdc.Finish(nullptr);
+   }
++  //注册dex_cache
+   ObjPtr<mirror::DexCache> dex_cache = RegisterDexFile(*new_dex_file, class_loader.Get());
+   if (dex_cache == nullptr) {
+     self->AssertPendingException();
+     return sdc.Finish(nullptr);
+   }
++  //设置dex缓存
+   klass->SetDexCache(dex_cache);
+   SetupClass(*new_dex_file, *new_class_def, klass, class_loader.Get());
+ 
+@@ -3196,6 +3238,11 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
+   // end up allocating unfree-able linear alloc resources and then lose the race condition. The
+   // other reason is that the field roots are only visited from the class table. So we need to be
+   // inserted before we allocate / fill in these fields.
++  /**
++   * self 线程
++   * new_dex_file 预加载后的dex_file文件，java类
++   * klass 描述加载完成后的类
++   */
+   LoadClass(self, *new_dex_file, *new_class_def, klass);
+   if (self->IsExceptionPending()) {
+     VLOG(class_linker) << self->GetException()->Dump();
+@@ -3228,6 +3275,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
+   auto interfaces = hs.NewHandle<mirror::ObjectArray<mirror::Class>>(nullptr);
+ 
+   MutableHandle<mirror::Class> h_new_class = hs.NewHandle<mirror::Class>(nullptr);
++  //用于连接父类，子类成员函数等，LinkClass成功后，返回h_new_class的状态
+   if (!LinkClass(self, descriptor, klass, interfaces, &h_new_class)) {
+     // Linking failed.
+     if (!klass->IsErroneous()) {
+@@ -3657,6 +3705,12 @@ LinearAlloc* ClassLinker::GetOrCreateAllocatorForClassLoader(ObjPtr<mirror::Clas
+   return allocator;
+ }
+ 
++/** 加载类的成员变量和成员函数信息
++  * self 
++  * dex_file 描述要加载的dex文件
++  * dex_class_def 描述要加载的dex文件信息
++  * klass 描述加载完成的类
++ */
+ void ClassLinker::LoadClass(Thread* self,
+                             const DexFile& dex_file,
+                             const dex::ClassDef& dex_class_def,
+@@ -3675,10 +3729,13 @@ void ClassLinker::LoadClass(Thread* self,
+     // Load static fields.
+     // We allow duplicate definitions of the same field in a class_data_item
+     // but ignore the repeated indexes here, b/21868015.
++    //通过类加载器获取一个大小空间
+     LinearAlloc* const allocator = GetAllocatorForClassLoader(klass->GetClassLoader());
++    //创建固定的长度数组对象，用来储存类中的静态成员变量
+     LengthPrefixedArray<ArtField>* sfields = AllocArtFieldArray(self,
+                                                                 allocator,
+                                                                 accessor.NumStaticFields());
++    //储存非静态成员变量
+     LengthPrefixedArray<ArtField>* ifields = AllocArtFieldArray(self,
+                                                                 allocator,
+                                                                 accessor.NumInstanceFields());
+@@ -3689,10 +3746,12 @@ void ClassLinker::LoadClass(Thread* self,
+ 
+     // Methods
+     bool has_oat_class = false;
++    //如果启动的不是dex2oat（编译虚拟机）并且方法没有被编译过，先尝试找下编译过的oatClass
+     const OatFile::OatClass oat_class = (runtime->IsStarted() && !runtime->IsAotCompiler())
+         ? OatFile::FindOatClass(dex_file, klass->GetDexClassDefIndex(), &has_oat_class)
+         : OatFile::OatClass::Invalid();
+     const OatFile::OatClass* oat_class_ptr = has_oat_class ? &oat_class : nullptr;
++    //设置klass类的成员方法变量
+     klass->SetMethodsPtr(
+         AllocArtMethodArray(self, allocator, accessor.NumMethods()),
+         accessor.NumDirectMethods(),
+@@ -3703,12 +3762,13 @@ void ClassLinker::LoadClass(Thread* self,
+ 
+     // Use the visitor since the ranged based loops are bit slower from seeking. Seeking to the
+     // methods needs to decode all of the fields.
++    //解码所有的字段和方法
+     accessor.VisitFieldsAndMethods([&](
+         const ClassAccessor::Field& field) REQUIRES_SHARED(Locks::mutator_lock_) {
+           uint32_t field_idx = field.GetIndex();
+           DCHECK_GE(field_idx, last_static_field_idx);  // Ordering enforced by DexFileVerifier.
+           if (num_sfields == 0 || LIKELY(field_idx > last_static_field_idx)) {
+-            LoadField(field, klass, &sfields->At(num_sfields));
++            LoadField(field, klass, &sfields->At(num_sfields)); //加载字段 静态成员变量
+             ++num_sfields;
+             last_static_field_idx = field_idx;
+           }
+@@ -3716,14 +3776,23 @@ void ClassLinker::LoadClass(Thread* self,
+           uint32_t field_idx = field.GetIndex();
+           DCHECK_GE(field_idx, last_instance_field_idx);  // Ordering enforced by DexFileVerifier.
+           if (num_ifields == 0 || LIKELY(field_idx > last_instance_field_idx)) {
+-            LoadField(field, klass, &ifields->At(num_ifields));
++            LoadField(field, klass, &ifields->At(num_ifields));//加载字段 非静态成员变亮
+             ++num_ifields;
+             last_instance_field_idx = field_idx;
+           }
+         }, [&](const ClassAccessor::Method& method) REQUIRES_SHARED(Locks::mutator_lock_) {
++          //获取private 私有方法 invoke-direct汇编代码中了解到
++          //一个ArtMethod对象就代表着一个方法
+           ArtMethod* art_method = klass->GetDirectMethodUnchecked(class_def_method_index,
+               image_pointer_size_);
++          //加载ArtMethod对象，并将其和自己饿吗关联起来
+           LoadMethod(dex_file, method, klass, art_method);
++          /** LinkCode 给ArtMethod设置方法入口
++           * 设置静态和非静态如何跳转
++           * 如果有一条方法是oat机器指令，就设置入口到本地机器指令执行
++           * 如果是Native方法，入口设置为跳转到JNI动态链接的方法中
++           * 如果是解释模式，入口设置为跳转到解释器中
++           */
+           LinkCode(this, art_method, oat_class_ptr, class_def_method_index);
+           uint32_t it_method_index = method.GetIndex();
+           if (last_dex_method_index == it_method_index) {
+@@ -3736,10 +3805,18 @@ void ClassLinker::LoadClass(Thread* self,
+           }
+           ++class_def_method_index;
+         }, [&](const ClassAccessor::Method& method) REQUIRES_SHARED(Locks::mutator_lock_) {
++          //获取public方法 invoke-virtual会变代码中了解到
+           ArtMethod* art_method = klass->GetVirtualMethodUnchecked(
+               class_def_method_index - accessor.NumDirectMethods(),
+               image_pointer_size_);
++              //加载ArtMethod对象，并将其和自己饿吗关联起来
+           LoadMethod(dex_file, method, klass, art_method);
++          /** LinkCode 给ArtMethod设置方法入口
++           * 设置静态和非静态如何跳转
++           * 如果有一条方法是oat机器指令，就设置入口到本地机器指令执行
++           * 如果是Native方法，入口设置为跳转到JNI动态链接的方法中
++           * 如果是解释模式，入口设置为跳转到解释器中
++           */
+           LinkCode(this, art_method, oat_class_ptr, class_def_method_index);
+           ++class_def_method_index;
+         });
+diff --git a/runtime/common_dex_operations.h b/runtime/common_dex_operations.h
+index 882e3ce4c7..2a6576fd34 100644
+--- a/runtime/common_dex_operations.h
++++ b/runtime/common_dex_operations.h
+@@ -57,6 +57,11 @@ namespace interpreter {
+                                           JValue* result);
+ }  // namespace interpreter
+ 
++/**
++ * caller_method a方法的名字
++ * callee_frame b方法的对象
++ * use_interpreter_entrypoint 每个方法都有两个执行入口点 程序到这里 只能理解成该方法是热方法还是冷方法，或者当前是不是处于调试模式
++ */
+ inline void PerformCall(Thread* self,
+                         const CodeItemDataAccessor& accessor,
+                         ArtMethod* caller_method,
+@@ -65,14 +70,18 @@ inline void PerformCall(Thread* self,
+                         JValue* result,
+                         bool use_interpreter_entrypoint)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
++      //a方法名有了，b方法对象又了 可以打印他们的调用关系链链
++
++      //进行类似递归的方式 a执行b b执行c c执行d.....
+   if (LIKELY(Runtime::Current()->IsStarted())) {
+-    if (use_interpreter_entrypoint) {
++    if (use_interpreter_entrypoint) { //解释模式执行
+       interpreter::ArtInterpreterToInterpreterBridge(self, accessor, callee_frame, result);
+-    } else {
++    } else {//从解释执行模式i进入机器码执行模式
+       interpreter::ArtInterpreterToCompiledCodeBridge(
+           self, caller_method, callee_frame, first_dest_reg, result);
+     }
+   } else {
++    //解释执行模式
+     interpreter::UnstartedRuntime::Invoke(self, accessor, callee_frame, result, first_dest_reg);
+   }
+ }
+diff --git a/runtime/interpreter/interpreter.cc b/runtime/interpreter/interpreter.cc
+index 302551f8dd..f0c2cb06c9 100644
+--- a/runtime/interpreter/interpreter.cc
++++ b/runtime/interpreter/interpreter.cc
+@@ -249,8 +249,11 @@ static JValue ExecuteSwitch(Thread* self,
+                             ShadowFrame& shadow_frame,
+                             JValue result_register,
+                             bool interpret_one_instruction) REQUIRES_SHARED(Locks::mutator_lock_) {
++  //虚拟机是否在运行中 
+   if (Runtime::Current()->IsActiveTransaction()) {
++    //是否忽略Access入口检查 判断是否有权限执行本方法 大部分情况下该if条件是满足的
+     if (shadow_frame.GetMethod()->SkipAccessChecks()) {
++      //ExecuteSwitchImpl interpreter_switch_impl.h
+       return ExecuteSwitchImpl<false, true>(
+           self, accessor, shadow_frame, result_register, interpret_one_instruction);
+     } else {
+@@ -258,6 +261,7 @@ static JValue ExecuteSwitch(Thread* self,
+           self, accessor, shadow_frame, result_register, interpret_one_instruction);
+     }
+   } else {
++    //判断是否有权限执行本方法 大部分情况下该if条件是满足的
+     if (shadow_frame.GetMethod()->SkipAccessChecks()) {
+       return ExecuteSwitchImpl<false, false>(
+           self, accessor, shadow_frame, result_register, interpret_one_instruction);
+@@ -268,6 +272,10 @@ static JValue ExecuteSwitch(Thread* self,
+   }
+ }
+ 
++/** 解释模式执行具体方法的函数 Android13中解释模式执行区别于之前的版本 只用了c++ switch的方式
++ * shadow_frame 要执行的方法对象
++ * 它表示是否强制使用解释模式执行 默认为false
++ */
+ static inline JValue Execute(
+     Thread* self,
+     const CodeItemDataAccessor& accessor,
+@@ -278,6 +286,12 @@ static inline JValue Execute(
+   DCHECK(!shadow_frame.GetMethod()->IsAbstract());
+   DCHECK(!shadow_frame.GetMethod()->IsNative());
+ 
++  /**
++   * 一个 ArtMethod 对象代表着一个方法
++   * ArtMethod* method = shadow_frame.GetMethod(); //获取一个art方法
++   * method 这个内存地址中记录着这个方法开始的位置
++   */
++
+   // Check that we are using the right interpreter.
+   if (kIsDebugBuild && self->UseMterp() != CanUseMterp()) {
+     // The flag might be currently being updated on all threads. Retry with lock.
+@@ -285,6 +299,7 @@ static inline JValue Execute(
+     DCHECK_EQ(self->UseMterp(), CanUseMterp());
+   }
+ 
++  //开始就以解释模式执行 这种情况为纯解释模式执行的方法，此时，就需要检查它是否存在jit的情况
+   if (LIKELY(!from_deoptimize)) {  // Entering the method, but not via deoptimization.
+     if (kIsDebugBuild) {
+       CHECK_EQ(shadow_frame.GetDexPC(), 0u);
+@@ -331,12 +346,12 @@ static inline JValue Execute(
+         return ret;
+       }
+     }
+-
++    //判断这个解释执行的方法 是否经过jit编译了
+     if (!stay_in_interpreter && !self->IsForceInterpreter()) {
+       jit::Jit* jit = Runtime::Current()->GetJit();
+       if (jit != nullptr) {
+-        jit->MethodEntered(self, shadow_frame.GetMethod());
+-        if (jit->CanInvokeCompiledCode(method)) {
++        jit->MethodEntered(self, shadow_frame.GetMethod()); //对方法进行编译操作
++        if (jit->CanInvokeCompiledCode(method)) { //可以调用编译的代码
+           JValue result;
+ 
+           // Pop the shadow frame before calling into compiled code.
+@@ -354,10 +369,10 @@ static inline JValue Execute(
+       }
+     }
+   }
+-
++  //解释执行的处理逻辑
+   ArtMethod* method = shadow_frame.GetMethod();
+ 
+-  DCheckStaticState(self, method);
++  DCheckStaticState(self, method); //检查方法是否是静态方法
+ 
+   // Lock counting is a special version of accessibility checks, and for simplicity and
+   // reduction of template parameters, we gate it behind access-checks mode.
+@@ -372,6 +387,7 @@ static inline JValue Execute(
+       !method->IsCompilable() ||
+       method->MustCountLocks() ||
+       Runtime::Current()->IsActiveTransaction()) {
++        //进入方法流水线，执行这个方法c++ switch
+     return ExecuteSwitch(
+         self, accessor, shadow_frame, result_register, /*interpret_one_instruction=*/ false);
+   }
+@@ -401,6 +417,8 @@ static inline JValue Execute(
+   }
+ }
+ 
++// 解释模式执行代码
++//函数前面的部分都在做压栈操作
+ void EnterInterpreterFromInvoke(Thread* self,
+                                 ArtMethod* method,
+                                 ObjPtr<mirror::Object> receiver,
+@@ -479,6 +497,7 @@ void EnterInterpreterFromInvoke(Thread* self,
+   }
+   self->EndAssertNoThreadSuspension(old_cause);
+   // Do this after populating the shadow frame in case EnsureInitialized causes a GC.
++  //静态方法会被预编译成本地方法 虽然上方已经将方法压栈了 但这里会被释放掉 执行的时候走 本地方法执行
+   if (method->IsStatic()) {
+     ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
+     if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
+@@ -493,7 +512,10 @@ void EnterInterpreterFromInvoke(Thread* self,
+       DCHECK(h_class->IsInitializing());
+     }
+   }
++
++  //如果不是native函数
+   if (LIKELY(!method->IsNative())) {
++    //执行dex指令
+     JValue r = Execute(self, accessor, *shadow_frame, JValue(), stay_in_interpreter);
+     if (result != nullptr) {
+       *result = r;
+@@ -503,6 +525,8 @@ void EnterInterpreterFromInvoke(Thread* self,
+     // generated stub) except during testing and image writing.
+     // Update args to be the args in the shadow frame since the input ones could hold stale
+     // references pointers due to moving GC.
++
++    //执行so中的指令
+     args = shadow_frame->GetVRegArgs(method->IsStatic() ? 0 : 1);
+     if (!Runtime::Current()->IsStarted()) {
+       UnstartedRuntime::Jni(self, method, receiver.Ptr(), args, result);
+diff --git a/runtime/interpreter/interpreter_common.cc b/runtime/interpreter/interpreter_common.cc
+index 4e88eda162..0e169b44ea 100644
+--- a/runtime/interpreter/interpreter_common.cc
++++ b/runtime/interpreter/interpreter_common.cc
+@@ -1177,7 +1177,11 @@ static inline void AssignRegister(ShadowFrame* new_shadow_frame, const ShadowFra
+     new_shadow_frame->SetVReg(dest_reg, src_value);
+   }
+ }
+-
++    /** 复制寄存器 从调用者a方法的ShadowFrame对象中拷贝方法b方法所需要的参数到b方法的ShadowFrame对象中
++     * shadow_frame a
++     * new_shadow_frame b
++     * arg 参数
++     */
+ template <bool is_range>
+ inline void CopyRegisters(ShadowFrame& caller_frame,
+                           ShadowFrame* callee_frame,
+@@ -1200,6 +1204,15 @@ inline void CopyRegisters(ShadowFrame& caller_frame,
+   }
+ }
+ 
++  /** 
++   * is_range 如果方法参数超过5个 会使用invoke-xxxx-range指令
++   * do_access_check  检查方法中是否有权限调用b方法
++   * called_method b方法
++   * shadow_frame a方法对象
++   * inst 存放着所有要执行的方法的数组
++   * inst_data invoke 指令对应的参数
++   * result 存放执行b方法后的结果
++   */
+ template <bool is_range,
+           bool do_assignability_check>
+ static inline bool DoCallCommon(ArtMethod* called_method,
+@@ -1211,6 +1224,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
+                                 uint32_t vregC) {
+   bool string_init = false;
+   // Replace calls to String.<init> with equivalent StringFactory call.
++  //String类的构造方法
+   if (UNLIKELY(called_method->GetDeclaringClass()->IsStringClass()
+                && called_method->IsConstructor())) {
+     called_method = WellKnownClasses::StringInitToStringFactory(called_method);
+@@ -1228,6 +1242,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
+   // For unstarted runtimes, always use the interpreter entrypoint. This fixes the case where we are
+   // doing cross compilation. Note that GetEntryPointFromQuickCompiledCode doesn't use the image
+   // pointer size here and this may case an overflow if it is called from the compiler. b/62402160
++  //是否使用解释器 或 编译器入口
+   const bool use_interpreter_entrypoint = !Runtime::Current()->IsStarted() ||
+       ClassLinker::ShouldUseInterpreterEntrypoint(
+           called_method,
+@@ -1387,6 +1402,12 @@ static inline bool DoCallCommon(ArtMethod* called_method,
+       DCHECK_EQ(num_regs, first_dest_reg + number_of_inputs);
+     }
+ 
++    /** 复制寄存器 从调用者a方法的ShadowFrame对象中拷贝方法b方法所需要的参数到b方法的ShadowFrame对象中
++     * shadow_frame a
++     * new_shadow_frame b
++     * arg 参数
++     */
++
+     CopyRegisters<is_range>(shadow_frame,
+                             new_shadow_frame,
+                             arg,
+@@ -1396,6 +1417,11 @@ static inline bool DoCallCommon(ArtMethod* called_method,
+     self->EndAssertNoThreadSuspension(old_cause);
+   }
+ 
++  /**
++   * shadow_frame a方法对象 还是原来的a shadow_frame
++   * new_shadow_frame b方法对象 已经有参数的b shadow_frame
++   */
++  // 执行调用
+   PerformCall(self,
+               accessor,
+               shadow_frame.GetMethod(),
+@@ -1410,22 +1436,32 @@ static inline bool DoCallCommon(ArtMethod* called_method,
+ 
+   return !self->IsExceptionPending();
+ }
+-
++  /** 
++   * is_range 如果方法参数超过5个 会使用invoke-xxxx-range指令
++   * do_access_check  检查方法中是否有权限调用b方法
++   * called_method b方法
++   * shadow_frame a方法对象
++   * inst 存放着所有要执行的方法的数组
++   * inst_data invoke 指令对应的参数
++   * result 存放执行b方法后的结果
++   */
+ template<bool is_range, bool do_assignability_check>
+ bool DoCall(ArtMethod* called_method, Thread* self, ShadowFrame& shadow_frame,
+             const Instruction* inst, uint16_t inst_data, JValue* result) {
+-  // Argument word count.
++  // Argument word count. 取出参数的数量
+   const uint16_t number_of_inputs =
+       (is_range) ? inst->VRegA_3rc(inst_data) : inst->VRegA_35c(inst_data);
+ 
+   // TODO: find a cleaner way to separate non-range and range information without duplicating
+   //       code.
++  //最大值为5 arg用来存参数
+   uint32_t arg[Instruction::kMaxVarArgRegs] = {};  // only used in invoke-XXX.
+   uint32_t vregC = 0;
+-  if (is_range) {
++  if (is_range) { //超过5个为true
+     vregC = inst->VRegC_3rc();
+   } else {
+     vregC = inst->VRegC_35c();
++    //被调用的方法b的参数存放到arg中
+     inst->GetVarArgs(arg, inst_data);
+   }
+ 
+diff --git a/runtime/interpreter/interpreter_common.h b/runtime/interpreter/interpreter_common.h
+index 959df0010d..8b61e7b418 100644
+--- a/runtime/interpreter/interpreter_common.h
++++ b/runtime/interpreter/interpreter_common.h
+@@ -224,6 +224,7 @@ static inline ALWAYS_INLINE void PerformNonStandardReturn(
+ 
+ // Handles all invoke-XXX/range instructions except for invoke-polymorphic[/range].
+ // Returns true on success, otherwise throws an exception and returns false.
++//模版函数 执行所有的smail代码中的 invoke-xxx invoke-xxxx-range 等方法 成功返回true 失败抛出异常
+ template<InvokeType type, bool is_range, bool do_access_check, bool is_mterp>
+ static ALWAYS_INLINE bool DoInvoke(Thread* self,
+                                    ShadowFrame& shadow_frame,
+@@ -232,13 +233,24 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
+                                    JValue* result)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
+   // Make sure to check for async exceptions before anything else.
++  /** 例：a方法中调用b方法
++   * type 调用类型 比如static direct
++   * is_mterp 如果方法超过五个参数 会使用invoke-xxxx-range这样的指令
++   * do_access_check 是否需要检查访问权限
++   * shadow_frame a方法对象
++   * inst_data invoke 指令对应的参数
++   * result 存放执行b方法后的结果
++   */
+   if (is_mterp && self->UseMterp()) {
+     DCHECK(!self->ObserveAsyncException());
+   } else if (UNLIKELY(self->ObserveAsyncException())) {
+     return false;
+   }
++  //b方法在数组中的索引位置
+   const uint32_t method_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
++  //找到要执行的方法对象（b）
+   const uint32_t vregC = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
++  //代表着a方法(调用者)
+   ArtMethod* sf_method = shadow_frame.GetMethod();
+ 
+   // Try to find the method in small thread-local cache first (only used when
+@@ -265,9 +277,18 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
+   }
+ 
+   // Null pointer check and virtual method resolution.
++  //空指针检查和虚拟方法解析
+   ObjPtr<mirror::Object> receiver =
+       (type == kStatic) ? nullptr : shadow_frame.GetVRegReference(vregC);
++      //方法b（被调用者）
+   ArtMethod* called_method;
++  /** 得到被调用的方法 b 对应的ArtMethod对象
++   * type 调用类型 比如 Static/Direct
++   * do_access_check 检查当前方法中是否有权限调用b方法
++   * method_idx b方法在数组中的索引位置
++   * resolved_method 关系
++   * sf_method 调用者
++   */
+   called_method = FindMethodToCall<type, do_access_check>(
+       method_idx, resolved_method, &receiver, sf_method, self);
+   if (UNLIKELY(called_method == nullptr)) {
+@@ -275,12 +296,15 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
+     result->SetJ(0);
+     return false;
+   }
++  //检查是否可以调用
+   if (UNLIKELY(!called_method->IsInvokable())) {
+     called_method->ThrowInvocationTimeError();
+     result->SetJ(0);
+     return false;
+   }
+ 
++  //方法的调用者和被调用者都找到了
++ //jit模式 一边执行一边执行
+   jit::Jit* jit = Runtime::Current()->GetJit();
+   if (is_mterp && !is_range && called_method->IsIntrinsic()) {
+     if (MterpHandleIntrinsic(&shadow_frame, called_method, inst, inst_data,
+@@ -380,6 +404,15 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
+     return !self->IsExceptionPending();
+   }
+ 
++  /** 
++   * is_range 如果方法参数超过5个 会使用invoke-xxxx-range指令
++   * do_access_check  检查方法中是否有权限调用b方法
++   * called_method b方法
++   * shadow_frame a方法对象
++   * inst 存放着所有要执行的方法的数组
++   * inst_data invoke 指令对应的参数
++   * result 存放执行b方法后的结果
++   */
+   return DoCall<is_range, do_access_check>(called_method, self, shadow_frame, inst, inst_data,
+                                            result);
+ }
+@@ -809,27 +842,29 @@ NO_RETURN void UnexpectedOpcode(const Instruction* inst, const ShadowFrame& shad
+   REQUIRES_SHARED(Locks::mutator_lock_);
+ 
+ // Set true if you want TraceExecution invocation before each bytecode execution.
+-constexpr bool kTraceExecutionEnabled = false;
+-
++constexpr bool kTraceExecutionEnabled = false; //此处一旦设置为true 会打印出每一行要执行的smail指令
++//打印执行时的smail指令
+ static inline void TraceExecution(const ShadowFrame& shadow_frame, const Instruction* inst,
+                                   const uint32_t dex_pc)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
+   if (kTraceExecutionEnabled) {
+ #define TRACE_LOG std::cerr
+     std::ostringstream oss;
+-    oss << shadow_frame.GetMethod()->PrettyMethod()
+-        << android::base::StringPrintf("\n0x%x: ", dex_pc)
+-        << inst->DumpString(shadow_frame.GetMethod()->GetDexFile()) << "\n";
+-    for (uint32_t i = 0; i < shadow_frame.NumberOfVRegs(); ++i) {
+-      uint32_t raw_value = shadow_frame.GetVReg(i);
+-      ObjPtr<mirror::Object> ref_value = shadow_frame.GetVRegReference(i);
+-      oss << android::base::StringPrintf(" vreg%u=0x%08X", i, raw_value);
++    oss << shadow_frame.GetMethod()->PrettyMethod()//当前要执行的方法名字
++        << android::base::StringPrintf("\n0x%x: ", dex_pc) //方法的地址(指令在当前函数中的地址)
++        << inst->DumpString(shadow_frame.GetMethod()->GetDexFile()) << "\n"; ///打印当前要执行的机器码 转变成 smail指令
++        //遍历v寄存器的数量
++    for (uint32_t i = 0; i < shadow_frame.NumberOfVRegs(); ++i) { //遍历当前方法所使用的参数
++      uint32_t raw_value = shadow_frame.GetVReg(i);//根据索引取出 寄存器
++      ObjPtr<mirror::Object> ref_value = shadow_frame.GetVRegReference(i);//获取饮用类型的寄存器的值
++      oss << android::base::StringPrintf(" vreg%u=0x%08X", i, raw_value);//字符串格式化
++      //判断是不是字符串 并且值不为空
+       if (ref_value != nullptr) {
+         if (ref_value->GetClass()->IsStringClass() &&
+             !ref_value->AsString()->IsValueNull()) {
+           oss << "/java.lang.String \"" << ref_value->AsString()->ToModifiedUtf8() << "\"";
+         } else {
+-          oss << "/" << ref_value->PrettyTypeOf();
++          oss << "/" << ref_value->PrettyTypeOf();//输出
+         }
+       }
+     }
+diff --git a/runtime/interpreter/interpreter_switch_impl-inl.h b/runtime/interpreter/interpreter_switch_impl-inl.h
+index 8e16e04bfa..57249858e7 100644
+--- a/runtime/interpreter/interpreter_switch_impl-inl.h
++++ b/runtime/interpreter/interpreter_switch_impl-inl.h
+@@ -1842,30 +1842,36 @@ ASAN_NO_INLINE static bool OP_##OPCODE_NAME(
+ DEX_INSTRUCTION_LIST(OPCODE_CASE)
+ #undef OPCODE_CASE
+ 
++//执行函数的方法
+ template<bool do_access_check, bool transaction_active>
+ void ExecuteSwitchImplCpp(SwitchImplContext* ctx) {
+   Thread* self = ctx->self;
+   const CodeItemDataAccessor& accessor = ctx->accessor;
+   ShadowFrame& shadow_frame = ctx->shadow_frame;
+   self->VerifyStack();
+-
++  //汇编代码中的pc对象 代表要执行哪个指令
+   uint32_t dex_pc = shadow_frame.GetDexPC();
++  //取出虚拟机对象
+   const auto* const instrumentation = Runtime::Current()->GetInstrumentation();
++  //insns代表方法dex指令码数组
+   const uint16_t* const insns = accessor.Insns();
+-  const Instruction* next = Instruction::At(insns + dex_pc);
++  const Instruction* next = Instruction::At(insns + dex_pc); //下一条指令
+ 
+   DCHECK(!shadow_frame.GetForceRetryInstruction())
+       << "Entered interpreter from invoke without retry instruction being handled!";
+ 
+-  bool const interpret_one_instruction = ctx->interpret_one_instruction;
++  bool const interpret_one_instruction = ctx->interpret_one_instruction; //是否解释一条指令 传入的参数为false
++
++  //执行smail代码 执行每一个函数的每一条指令
+   while (true) {
+     const Instruction* const inst = next;
+-    dex_pc = inst->GetDexPc(insns);
+-    shadow_frame.SetDexPC(dex_pc);
+-    TraceExecution(shadow_frame, inst, dex_pc);
++    dex_pc = inst->GetDexPc(insns); //在指令数组中 获取要执行的指令
++    shadow_frame.SetDexPC(dex_pc);//设置要执行的指令 
++    TraceExecution(shadow_frame, inst, dex_pc);//这里实现着代码执行跟踪记录---打印出每一行要执行的smail指令
+     uint16_t inst_data = inst->Fetch16(0);
+     bool exit = false;
+     bool success;  // Moved outside to keep frames small under asan.
++    //解释执行 最终调用了本文件中的 invoke-xxxs
+     if (InstructionHandler<do_access_check, transaction_active, Instruction::kInvalidFormat>(
+             ctx, instrumentation, self, shadow_frame, dex_pc, inst, inst_data, next, exit).
+             Preamble()) {
 diff --git a/runtime/native/dalvik_system_DexFile.cc b/runtime/native/dalvik_system_DexFile.cc
-index f8ad7f1b7a..9718acb135 100644
+index f8ad7f1b7a..66d7de9d28 100644
 --- a/runtime/native/dalvik_system_DexFile.cc
 +++ b/runtime/native/dalvik_system_DexFile.cc
 @@ -304,6 +304,7 @@ static jobject DexFile_openInMemoryDexFilesNative(JNIEnv* env,
@@ -219,6 +910,85 @@ index f8ad7f1b7a..9718acb135 100644
  static jobject DexFile_openDexFileNative(JNIEnv* env,
                                           jclass,
                                           jstring javaSourceName,
+@@ -395,6 +396,14 @@ static jboolean DexFile_closeDexFile(JNIEnv* env, jclass, jobject cookie) {
+   return all_deleted ? JNI_TRUE : JNI_FALSE;
+ }
+ 
++/**
++ * javaName 类名
++ * javaLoader 当前App的类加载器
++ * cookie 被加载过的dex文件数据对象
++ * dexFile dexFile对象
++ * （name,loader,cookie,dexFile）
++ * 最终返回值的意思：所有类，方法，全部准备就绪 可以随时执行
++ */
+ static jclass DexFile_defineClassNative(JNIEnv* env,
+                                         jclass,
+                                         jstring javaName,
+@@ -403,35 +412,43 @@ static jclass DexFile_defineClassNative(JNIEnv* env,
+                                         jobject dexFile) {
+   std::vector<const DexFile*> dex_files;
+   const OatFile* oat_file;
++  //将cookie数组数据(Array) 转化为dexFile数组数据
+   if (!ConvertJavaArrayToDexFiles(env, cookie, /*out*/ dex_files, /*out*/ oat_file)) {
+     VLOG(class_linker) << "Failed to find dex_file";
+     DCHECK(env->ExceptionCheck());
+     return nullptr;
+   }
+-
++  //检查类名是否为空
+   ScopedUtfChars class_name(env, javaName);
+   if (class_name.c_str() == nullptr) {
+     VLOG(class_linker) << "Failed to find class_name";
+     return nullptr;
+   }
+-  const std::string descriptor(DotToDescriptor(class_name.c_str()));
+-  const size_t hash(ComputeModifiedUtf8Hash(descriptor.c_str()));
++  const std::string descriptor(DotToDescriptor(class_name.c_str()));//"java.lang.String" 转化为 "Ljava/lang/String;"
++  const size_t hash(ComputeModifiedUtf8Hash(descriptor.c_str()));//计算hash
++  //dex_files 传入的被转化dex类数组
++  //dex_fide 代表遍历出的单个dex
+   for (auto& dex_file : dex_files) {
+     const dex::ClassDef* dex_class_def =
+-        OatDexFile::FindClassDef(*dex_file, descriptor.c_str(), hash);
++        OatDexFile::FindClassDef(*dex_file, descriptor.c_str(), hash);//通过类名描述符号查找类的定义
+     if (dex_class_def != nullptr) {
+       ScopedObjectAccess soa(env);
+-      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
++      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();//实例化class_linker
+       StackHandleScope<1> hs(soa.Self());
+       Handle<mirror::ClassLoader> class_loader(
+-          hs.NewHandle(soa.Decode<mirror::ClassLoader>(javaLoader)));
++          hs.NewHandle(soa.Decode<mirror::ClassLoader>(javaLoader)));//获取传入的classloader
+       ObjPtr<mirror::DexCache> dex_cache =
+-          class_linker->RegisterDexFile(*dex_file, class_loader.Get());
++          class_linker->RegisterDexFile(*dex_file, class_loader.Get()); //使用classloader注册dex_file到缓存
+       if (dex_cache == nullptr) {
+         // OOME or InternalError (dexFile already registered with a different class loader).
+         soa.Self()->AssertPendingException();
+         return nullptr;
+       }
++      /** 定义类 ------->
++       * soa.Self() 线程
++       * descriptor.c_str() 类描述符
++       * dex_file 指针地址
++       */
+       ObjPtr<mirror::Class> result = class_linker->DefineClass(soa.Self(),
+                                                                descriptor.c_str(),
+                                                                hash,
+diff --git a/runtime/native/java_lang_reflect_Method.cc b/runtime/native/java_lang_reflect_Method.cc
+index 2c0dd806e1..58fda8db31 100644
+--- a/runtime/native/java_lang_reflect_Method.cc
++++ b/runtime/native/java_lang_reflect_Method.cc
+@@ -79,7 +79,7 @@ static jobjectArray Method_getExceptionTypes(JNIEnv* env, jobject javaMethod) {
+     }
+   }
+ }
+-
++//Java层的method invoke
+ static jobject Method_invoke(JNIEnv* env, jobject javaMethod, jobject javaReceiver,
+                              jobjectArray javaArgs) {
+   ScopedFastNativeObjectAccess soa(env);
 diff --git a/runtime/oat_file.cc b/runtime/oat_file.cc
 index 14e7a1b60e..4fafc7eb05 100644
 --- a/runtime/oat_file.cc
@@ -392,3 +1162,108 @@ index 542ea092ff..8c2c18b079 100644
    return dex_files;
  }
  
+diff --git a/runtime/reflection.cc b/runtime/reflection.cc
+index f642bcb092..561d288963 100644
+--- a/runtime/reflection.cc
++++ b/runtime/reflection.cc
+@@ -446,15 +446,19 @@ ArtMethod* FindVirtualMethod(ObjPtr<mirror::Object> receiver, ArtMethod* method)
+   return receiver->GetClass()->FindVirtualMethodForVirtualOrInterface(method, kRuntimePointerSize);
+ }
+ 
+-
++/**
++ * method 被调用的方法
++ * arg_array 方法的参数
++ */
+ void InvokeWithArgArray(const ScopedObjectAccessAlreadyRunnable& soa,
+                                ArtMethod* method, ArgArray* arg_array, JValue* result,
+                                const char* shorty)
+     REQUIRES_SHARED(Locks::mutator_lock_) {
+   uint32_t* args = arg_array->GetArray();
+-  if (UNLIKELY(soa.Env()->IsCheckJniEnabled())) {
++  if (UNLIKELY(soa.Env()->IsCheckJniEnabled())) { //检查jni是否已经启动
+     CheckMethodArguments(soa.Vm(), method->GetInterfaceMethodIfProxy(kRuntimePointerSize), args);
+   }
++  //调用方法主入口 方法中决定着用哪个模式执行 本地模式/解释模式 
+   method->Invoke(soa.Self(), args, arg_array->GetNumBytes(), result, shorty);
+ }
+ 
+@@ -472,7 +476,7 @@ bool CheckArgsForInvokeMethod(ArtMethod* np_method,
+   }
+   return true;
+ }
+-
++//调用放啊
+ ALWAYS_INLINE
+ bool InvokeMethodImpl(const ScopedObjectAccessAlreadyRunnable& soa,
+                       ArtMethod* m,
+@@ -489,7 +493,7 @@ bool InvokeMethodImpl(const ScopedObjectAccessAlreadyRunnable& soa,
+     CHECK(soa.Self()->IsExceptionPending());
+     return false;
+   }
+-
++  //使用ArgArray调用
+   InvokeWithArgArray(soa, m, &arg_array, result, *shorty);
+ 
+   // Wrap any exception with "Ljava/lang/reflect/InvocationTargetException;" and return early.
+@@ -691,6 +695,12 @@ JValue InvokeVirtualOrInterfaceWithVarArgs(const ScopedObjectAccessAlreadyRunnab
+   return InvokeVirtualOrInterfaceWithVarArgs(soa, obj, jni::DecodeArtMethod(mid), args);
+ }
+ 
++/**
++ * javaMethod 方法对象
++ * javaReceiver 对象
++ * javaArgs 参数
++ * num_frames 堆栈帧
++ */
+ template <PointerSize kPointerSize>
+ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaMethod,
+                      jobject javaReceiver, jobject javaArgs, size_t num_frames) {
+@@ -702,12 +712,14 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
+     ThrowStackOverflowError(soa.Self());
+     return nullptr;
+   }
+-
++  //对传入的方法进行解码
+   ObjPtr<mirror::Executable> executable = soa.Decode<mirror::Executable>(javaMethod);
+   const bool accessible = executable->IsAccessible();
++  //获取可执行的art方法，一个ArtMethod对象就是一个方法
+   ArtMethod* m = executable->GetArtMethod();
+-
++  //获取声明类
+   ObjPtr<mirror::Class> declaring_class = m->GetDeclaringClass();
++  //类是否初始化完成
+   if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
+     Thread* self = soa.Self();
+     StackHandleScope<1> hs(self);
+@@ -723,6 +735,7 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
+   ObjPtr<mirror::Object> receiver;
+   if (!m->IsStatic()) {
+     // Replace calls to String.<init> with equivalent StringFactory call.
++    //字符串类 & 构造函数
+     if (declaring_class->IsStringClass() && m->IsConstructor()) {
+       m = WellKnownClasses::StringInitToStringFactory(m);
+       CHECK(javaReceiver == nullptr);
+@@ -739,9 +752,11 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
+   }
+ 
+   // Get our arrays of arguments and their types, and check they're the same size.
++  //获取参数数组及类型
+   ObjPtr<mirror::ObjectArray<mirror::Object>> objects =
+       soa.Decode<mirror::ObjectArray<mirror::Object>>(javaArgs);
+   auto* np_method = m->GetInterfaceMethodIfProxy(kPointerSize);
++  //校验方法是否可以被使用
+   if (!CheckArgsForInvokeMethod(np_method, objects)) {
+     return nullptr;
+   }
+@@ -765,8 +780,10 @@ jobject InvokeMethod(const ScopedObjectAccessAlreadyRunnable& soa, jobject javaM
+   }
+ 
+   // Invoke the method.
++  //调用这个方法
+   JValue result;
+   const char* shorty;
++  //关键函数
+   if (!InvokeMethodImpl(soa, m, np_method, receiver, objects, &shorty, &result)) {
+     return nullptr;
+   }
