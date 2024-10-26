@@ -21,5 +21,5 @@ chmod +x apply_patches.sh
 
 
 
-可搭配我的[博客](https://www.blog.jiangnight.com/article/aosp-study)查看
+可搭配我的[博客](https://blog.jiangnight.com/article/aosp-study)查看
 
